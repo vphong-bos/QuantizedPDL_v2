@@ -51,9 +51,11 @@ def parse_args(argv=None):
 
 def run_inference(model, torch_input, model_category_const):
     with torch.no_grad():
-        panoptic_seg, center_points = model(torch_input)
+        semantic_logits, center_heatmap, offset_map, _ = model(torch_input)
 
-    return panoptic_seg, center_points
+    if model_category_const == DEEPLAB_V3_PLUS:
+        return semantic_logits
+    return semantic_logits, center_heatmap, offset_map, _
 
 
 def save_visualization(
