@@ -1,0 +1,1 @@
+PLease download Panoptic-DeepLab CityScapes weights file (https://dl.fbaipublicfiles.com/detectron2/PanopticDeepLab/Cityscapes-PanopticSegmentation/panoptic_deeplab_R_52_os16_mg124_poly_90k_bs32/model_final_bd324a.pkl) and put weight file here.
