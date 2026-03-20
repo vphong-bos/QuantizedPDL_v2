@@ -342,10 +342,6 @@ def main(args):
         image_height=args.image_height,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        # mean=[0.485, 0.456, 0.406],
-        # std=[0.229, 0.224, 0.225],
-        mean=None,
-        std=None
     )
 
     print("Wrapping model for AIMET tracing...")
