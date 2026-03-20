@@ -79,7 +79,7 @@ def save_visualization(
             original_image=original_image,
         )
     else:
-        semantic_logits, center_heatmap, offset_map = output
+        semantic_logits, center_heatmap, offset_map, _ = output
 
         semantic_np = semantic_logits.float().squeeze(0).permute(1, 2, 0).cpu().numpy()
         center_np = center_heatmap.float().squeeze(0).permute(1, 2, 0).cpu().numpy()
