@@ -89,7 +89,7 @@ class Conv2d(torch.nn.Conv2d):
                         ), "SyncBatchNorm does not support empty inputs!"
 
         # Standard conv2d operation
-        x = F.Conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        x = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
 
         # Apply normalization if provided
         if self.norm is not None:
