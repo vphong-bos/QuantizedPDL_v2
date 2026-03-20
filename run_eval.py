@@ -18,7 +18,7 @@ from utils.export_onnx import export_optimized_onnx_model
 
 import torch
 from aimet_torch.v2.nn import QuantizationMixin
-from QuantizedPDL_v2.model.conv import Conv2d
+from model.conv2d import Conv2d
 
 @QuantizationMixin.implements(Conv2d)
 class QuantizedConv2d(QuantizationMixin, Conv2d):
