@@ -42,7 +42,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--model_category",
         type=str,
-        default="DEEPLAB_V3_PLUS",
+        default="PANOPTIC_DEEPLAB",
         choices=["DEEPLAB_V3_PLUS", "PANOPTIC_DEEPLAB"],
         help="semantic-only or full panoptic model",
     )
