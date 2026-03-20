@@ -9,108 +9,199 @@ from typing import Dict
 import torch
 import torch.nn as nn
 
-from model.bottleneck import Bottleneck
-from model.conv import conv1x1, conv3x3
+from model.bottleneck import BottleneckBlock
 from model.stem import StemBlock
 
-
 class ResNet(nn.Module):
+    """
+    PyTorch implementation of ResNet backbone for Panoptic DeepLab.
 
-    def __init__(self, block, layers, zero_init_residual=False,
-                 groups=1, width_per_group=64, replace_stride_with_dilation=None,
-                 norm_layer=None):
-        super(ResNet, self).__init__()
-        if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
-        self._norm_layer = norm_layer
+    Based on the model structure, the ResNet contains:
+    - stem: DeepLabStem (3 conv layers)
+    - res2: Sequential with 3 BottleneckBlocks (first has shortcut)
+    - res3: Sequential with 4 BottleneckBlocks (first has shortcut with stride=2)
+    - res4: Sequential with 6 BottleneckBlocks (first has shortcut with stride=2)
+    - res5: Sequential with 3 BottleneckBlocks (first has shortcut, uses dilated convolutions)
+    """
 
-        self.inplanes = 64
-        self.dilation = 1
-        if replace_stride_with_dilation is None:
-            # each element in the tuple indicates if we should replace
-            # the 2x2 stride with a dilated convolution instead
-            replace_stride_with_dilation = [False, False, False]
-        if len(replace_stride_with_dilation) != 3:
-            raise ValueError("replace_stride_with_dilation should be None "
-                             "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
-        self.groups = groups
-        self.base_width = width_per_group
-        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
-                               bias=False)
-        self.bn1 = norm_layer(self.inplanes)
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64, layers[0])
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2,
-                                       dilate=replace_stride_with_dilation[0])
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2,
-                                       dilate=replace_stride_with_dilation[1])
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
-                                       dilate=replace_stride_with_dilation[2])
-        # self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.fc = nn.Linear(512 * block.expansion, num_classes)
+    def __init__(self):
+        super().__init__()
 
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+        # Initialize stem
+        self.stem = StemBlock()
 
-        # Zero-initialize the last BN in each residual branch,
-        # so that the residual branch starts with zeros, and each residual block behaves like an identity.
-        # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
-        if zero_init_residual:
-            for m in self.modules():
-                if isinstance(m, Bottleneck):
-                    nn.init.constant_(m.bn3.weight, 0)
+        # Initialize res2 (3 blocks, first has shortcut)
+        # Input: 128 channels from stem, Output: 256 channels
+        self.res2 = nn.Sequential(
+            # Block 0: has shortcut, 128->256 channels
+            BottleneckBlock(
+                in_channels=128,
+                bottleneck_channels=64,
+                out_channels=256,
+                stride=1,
+                dilation=1,
+                has_shortcut=True,
+                shortcut_stride=1,
+            ),
+            # Block 1: no shortcut, 256->256 channels
+            BottleneckBlock(
+                in_channels=256, bottleneck_channels=64, out_channels=256, stride=1, dilation=1, has_shortcut=False
+            ),
+            # Block 2: no shortcut, 256->256 channels
+            BottleneckBlock(
+                in_channels=256, bottleneck_channels=64, out_channels=256, stride=1, dilation=1, has_shortcut=False
+            ),
+        )
 
-    def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
-        norm_layer = self._norm_layer
-        downsample = None
-        previous_dilation = self.dilation
-        if dilate:
-            self.dilation *= stride
-            stride = 1
-        if stride != 1 or self.inplanes != planes * block.expansion:
-            downsample = nn.Sequential(
-                conv1x1(self.inplanes, planes * block.expansion, stride),
-                norm_layer(planes * block.expansion),
-            )
+        # Initialize res3 (4 blocks, first has shortcut with stride=2)
+        # Input: 256 channels, Output: 512 channels
+        self.res3 = nn.Sequential(
+            # Block 0: has shortcut with stride=2, 256->512 channels
+            BottleneckBlock(
+                in_channels=256,
+                bottleneck_channels=128,
+                out_channels=512,
+                stride=2,
+                dilation=1,
+                has_shortcut=True,
+                shortcut_stride=2,
+            ),
+            # Block 1: no shortcut, 512->512 channels
+            BottleneckBlock(
+                in_channels=512, bottleneck_channels=128, out_channels=512, stride=1, dilation=1, has_shortcut=False
+            ),
+            # Block 2: no shortcut, 512->512 channels
+            BottleneckBlock(
+                in_channels=512, bottleneck_channels=128, out_channels=512, stride=1, dilation=1, has_shortcut=False
+            ),
+            # Block 3: no shortcut, 512->512 channels
+            BottleneckBlock(
+                in_channels=512, bottleneck_channels=128, out_channels=512, stride=1, dilation=1, has_shortcut=False
+            ),
+        )
 
-        layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
-                            self.base_width, previous_dilation, norm_layer))
-        self.inplanes = planes * block.expansion
-        for _ in range(1, blocks):
-            layers.append(block(self.inplanes, planes, groups=self.groups,
-                                base_width=self.base_width, dilation=self.dilation,
-                                norm_layer=norm_layer))
+        # Initialize res4 (6 blocks, first has shortcut with stride=2)
+        # Input: 512 channels, Output: 1024 channels
+        self.res4 = nn.Sequential(
+            # Block 0: has shortcut with stride=2, 512->1024 channels
+            BottleneckBlock(
+                in_channels=512,
+                bottleneck_channels=256,
+                out_channels=1024,
+                stride=2,
+                dilation=1,
+                has_shortcut=True,
+                shortcut_stride=2,
+            ),
+            # Block 1: no shortcut, 1024->1024 channels
+            BottleneckBlock(
+                in_channels=1024, bottleneck_channels=256, out_channels=1024, stride=1, dilation=1, has_shortcut=False
+            ),
+            # Block 2: no shortcut, 1024->1024 channels
+            BottleneckBlock(
+                in_channels=1024, bottleneck_channels=256, out_channels=1024, stride=1, dilation=1, has_shortcut=False
+            ),
+            # Block 3: no shortcut, 1024->1024 channels
+            BottleneckBlock(
+                in_channels=1024, bottleneck_channels=256, out_channels=1024, stride=1, dilation=1, has_shortcut=False
+            ),
+            # Block 4: no shortcut, 1024->1024 channels
+            BottleneckBlock(
+                in_channels=1024, bottleneck_channels=256, out_channels=1024, stride=1, dilation=1, has_shortcut=False
+            ),
+            # Block 5: no shortcut, 1024->1024 channels
+            BottleneckBlock(
+                in_channels=1024, bottleneck_channels=256, out_channels=1024, stride=1, dilation=1, has_shortcut=False
+            ),
+        )
 
-        return nn.Sequential(*layers)
+        # Initialize res5 (3 blocks, first has shortcut, uses dilated convolutions)
+        # Input: 1024 channels, Output: 2048 channels
+        # Note: Based on model structure, res5 uses dilated convolutions (dilation=2,4,8)
+        self.res5 = nn.Sequential(
+            # Block 0: has shortcut, 1024->2048 channels, dilation=2
+            BottleneckBlock(
+                in_channels=1024,
+                bottleneck_channels=512,
+                out_channels=2048,
+                stride=1,
+                dilation=2,
+                has_shortcut=True,
+                shortcut_stride=1,
+            ),
+            # Block 1: no shortcut, 2048->2048 channels, dilation=4
+            BottleneckBlock(
+                in_channels=2048, bottleneck_channels=512, out_channels=2048, stride=1, dilation=4, has_shortcut=False
+            ),
+            # Block 2: no shortcut, 2048->2048 channels, dilation=8
+            BottleneckBlock(
+                in_channels=2048, bottleneck_channels=512, out_channels=2048, stride=1, dilation=8, has_shortcut=False
+            ),
+        )
 
-    def _forward_impl(self, x):
-        outputs = {}
-        # See note [TorchScript super()]
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-        outputs['stem'] = x
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass through ResNet backbone.
 
-        x = self.layer1(x)
-        outputs['res2'] = x
+        Args:
+            x: Input tensor of shape [batch_size, 3, height, width]
 
-        x = self.layer2(x)
-        outputs['res3'] = x
+        Returns:
+            Dictionary containing intermediate feature maps:
+            - "res2": Output from res2 layer (256 channels)
+            - "res3": Output from res3 layer (512 channels)
+            - "res4": Output from res4 layer (1024 channels)
+            - "res5": Output from res5 layer (2048 channels)
+        """
+        # Stem processing
+        x = self.stem(x)
 
-        x = self.layer3(x)
-        outputs['res4'] = x
+        # res2
+        x = self.res2(x)
+        res2_out = x
 
-        x = self.layer4(x)
-        outputs['res5'] = x
+        # res3
+        x = self.res3(x)
+        res3_out = x
 
-        return outputs
+        # res4
+        x = self.res4(x)
+        res4_out = x
 
-    def forward(self, x):
-        return self._forward_impl(x)
+        # res5
+        x = self.res5(x)
+        res5_out = x
+
+        return {
+            "res2": res2_out,
+            "res3": res3_out,
+            "res4": res4_out,
+            "res5": res5_out,
+        }
+
+    def forward_single_output(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass returning only the final output (res5).
+
+        Args:
+            x: Input tensor of shape [batch_size, 3, height, width]
+
+        Returns:
+            Final feature map from res5 layer (2048 channels)
+        """
+        # Stem processing
+        x = self.stem(x)
+
+        # res2
+        x = self.res2(x)
+
+        # res3
+        x = self.res3(x)
+
+        # res4
+        x = self.res4(x)
+
+        # res5
+        x = self.res5(x)
+
+        return x
