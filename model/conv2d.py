@@ -22,120 +22,45 @@ def _check_if_dynamo_compiling() -> bool:
     else:
         return False
 
-import torch.nn as nn
+class Conv2d(nn.Conv2d):
+    """
+    Conv2d compatible with existing checkpoints.
 
-import torch.nn as nn
+    - Keeps weight/bias at the top level, so old state_dict keys still match
+    - Supports optional norm and activation
+    - Uses nn.Conv2d.forward() for the convolution itself
+    """
 
-class Conv2d(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        kernel_size,
-        stride=1,
-        padding=0,
-        dilation=1,
-        groups=1,
-        bias=False,
-        norm=None,
-        activation=None,
-    ):
-        super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
-            bias=bias,
-        )
+    def __init__(self, *args, **kwargs):
+        norm = kwargs.pop("norm", None)
+        activation = kwargs.pop("activation", None)
+
+        super().__init__(*args, **kwargs)
+
         self.norm = norm
         self.activation = activation
 
-    @property
-    def weight(self):
-        return self.conv.weight
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Optional empty-input handling, preserving old behavior
+        if not torch.jit.is_scripting():
+            is_dynamo_compiling = _check_if_dynamo_compiling()
+            if not is_dynamo_compiling:
+                with warnings.catch_warnings(record=True):
+                    if x.numel() == 0 and self.training:
+                        assert not isinstance(
+                            self.norm, nn.SyncBatchNorm
+                        ), "SyncBatchNorm does not support empty inputs!"
 
-    @property
-    def bias(self):
-        return self.conv.bias
+        # Important: use parent forward, not raw F.conv2d
+        x = super().forward(x)
 
-    @property
-    def in_channels(self):
-        return self.conv.in_channels
-
-    @property
-    def out_channels(self):
-        return self.conv.out_channels
-
-    @property
-    def kernel_size(self):
-        return self.conv.kernel_size
-
-    @property
-    def stride(self):
-        return self.conv.stride
-
-    @property
-    def padding(self):
-        return self.conv.padding
-
-    @property
-    def dilation(self):
-        return self.conv.dilation
-
-    @property
-    def groups(self):
-        return self.conv.groups
-
-    def forward(self, x):
-        x = self.conv(x)
         if self.norm is not None:
             x = self.norm(x)
+
         if self.activation is not None:
             x = self.activation(x)
+
         return x
-# class Conv2d(nn.Conv2d):
-#     """
-#     Conv2d compatible with existing checkpoints.
-
-#     - Keeps weight/bias at the top level, so old state_dict keys still match
-#     - Supports optional norm and activation
-#     - Uses nn.Conv2d.forward() for the convolution itself
-#     """
-
-#     def __init__(self, *args, **kwargs):
-#         norm = kwargs.pop("norm", None)
-#         activation = kwargs.pop("activation", None)
-
-#         super().__init__(*args, **kwargs)
-
-#         self.norm = norm
-#         self.activation = activation
-
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         # Optional empty-input handling, preserving old behavior
-#         if not torch.jit.is_scripting():
-#             is_dynamo_compiling = _check_if_dynamo_compiling()
-#             if not is_dynamo_compiling:
-#                 with warnings.catch_warnings(record=True):
-#                     if x.numel() == 0 and self.training:
-#                         assert not isinstance(
-#                             self.norm, nn.SyncBatchNorm
-#                         ), "SyncBatchNorm does not support empty inputs!"
-
-#         # Important: use parent forward, not raw F.conv2d
-#         x = super().forward(x)
-
-#         if self.norm is not None:
-#             x = self.norm(x)
-
-#         if self.activation is not None:
-#             x = self.activation(x)
-
-#         return x
 
 # class Conv2d(torch.nn.Conv2d):
 #     """
