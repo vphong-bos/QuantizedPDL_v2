@@ -103,7 +103,9 @@ class PanopticDeepLabInsEmbedHead(DeepLabV3PlusHead):
         self.offset_head = nn.Sequential(offset_head_conv1, offset_head_conv2)
 
         self.offset_predictor = Conv2d(head_channels, 2, kernel_size=1)
-        nn.init.constant_(self.offset_predictor.bias, 0)
+        # nn.init.constant_(self.offset_predictor.bias, 0)
+        if self.offset_predictor.bias is not None:
+            nn.init.constant_(self.offset_predictor.bias, 0)
 
     def forward(
         self,
