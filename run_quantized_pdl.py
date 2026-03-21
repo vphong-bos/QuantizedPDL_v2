@@ -403,9 +403,9 @@ def main(args):
             forward_fn=adaround_forward_fn,
         )
 
-        wrapped_model = wrapped_model.cpu().eval()
-        wrapped_model = Adaround.apply_adaround(
-            model=wrapped_model,
+        model = model.cpu().eval()
+        model = Adaround.apply_adaround(
+            model=model,
             dummy_input=dummy_input_cpu,
             params=adaround_params,
             path=args.adaround_path,
@@ -415,7 +415,13 @@ def main(args):
             default_config_file=args.config_file,
         )
 
-        wrapped_model = wrapped_model.to(args.device).eval()
+        model = model.to(args.device).eval()
+
+        wrapped_model = AimetTraceWrapper(
+            model=model,
+            model_category_const=model_category_const,
+        ).to(args.device).eval()
+
         print(
             f"AdaRound finished. Encodings saved under: "
             f"{os.path.join(args.adaround_path, args.adaround_prefix)}*.encodings"
