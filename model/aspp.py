@@ -161,21 +161,15 @@ class ASPP(nn.Module):
     def forward(self, x):
         size = x.shape[-2:]
 
-        # Keep original runtime validation, but skip it during tracing/export
-        if self.pool_kernel_size is not None and not torch.jit.is_tracing():
-            if size[0] % self.pool_kernel_size[0] != 0 or size[1] % self.pool_kernel_size[1] != 0:
-                raise ValueError(
-                    "`pool_kernel_size` must be divisible by the shape of inputs. "
-                    "Input size: {} `pool_kernel_size`: {}".format(size, self.pool_kernel_size)
-                )
-
-        res = []
-
-        for conv in self.convs[:-1]:
-            res.append(conv(x))
+        res = [conv(x) for conv in self.convs[:-1]]
 
         pool_out = self.convs[-1](x)
-        pool_out = F.interpolate(pool_out, size=size, mode="bilinear", align_corners=False).to(x.dtype)
+        pool_out = F.interpolate(
+            pool_out,
+            size=size,
+            mode="bilinear",
+            align_corners=False,
+        ).to(x.dtype)
         res.append(pool_out)
 
         res = torch.cat(res, dim=1)
@@ -185,3 +179,31 @@ class ASPP(nn.Module):
             res = F.dropout(res, self.dropout, training=self.training)
 
         return res
+
+    # def forward(self, x):
+    #     size = x.shape[-2:]
+
+    #     # Keep original runtime validation, but skip it during tracing/export
+    #     if self.pool_kernel_size is not None and not torch.jit.is_tracing():
+    #         if size[0] % self.pool_kernel_size[0] != 0 or size[1] % self.pool_kernel_size[1] != 0:
+    #             raise ValueError(
+    #                 "`pool_kernel_size` must be divisible by the shape of inputs. "
+    #                 "Input size: {} `pool_kernel_size`: {}".format(size, self.pool_kernel_size)
+    #             )
+
+    #     res = []
+
+    #     for conv in self.convs[:-1]:
+    #         res.append(conv(x))
+
+    #     pool_out = self.convs[-1](x)
+    #     pool_out = F.interpolate(pool_out, size=size, mode="bilinear", align_corners=False).to(x.dtype)
+    #     res.append(pool_out)
+
+    #     res = torch.cat(res, dim=1)
+    #     res = self.project(res)
+
+    #     if self.dropout > 0:
+    #         res = F.dropout(res, self.dropout, training=self.training)
+
+    #     return res
