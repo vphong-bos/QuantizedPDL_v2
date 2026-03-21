@@ -501,9 +501,12 @@ def main(args):
     quantized_model.eval()
 
     if args.save_quant_checkpoint is not None:
-        quantsim.save_checkpoint(sim, args.save_quant_checkpoint)
-        print(f"Saved AIMET sim checkpoint to: {args.save_quant_checkpoint}")
+        import pickle
 
+        with open(args.save_quant_checkpoint, "wb") as f:
+            pickle.dump(sim, f)
+
+        print(f"Saved AIMET sim checkpoint to: {args.save_quant_checkpoint}")
     from aimet_torch import onnx as aimet_onnx
 
     if not args.no_export:
