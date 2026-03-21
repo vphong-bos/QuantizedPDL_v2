@@ -22,32 +22,45 @@ def _check_if_dynamo_compiling() -> bool:
     else:
         return False
 
-class Conv2d(nn.Module):
+class Conv2d(nn.Conv2d):
+    """
+    Conv2d compatible with existing checkpoints.
+
+    - Keeps weight/bias at the top level, so old state_dict keys still match
+    - Supports optional norm and activation
+    - Uses nn.Conv2d.forward() for the convolution itself
+    """
+
     def __init__(self, *args, **kwargs):
-        super().__init__()
         norm = kwargs.pop("norm", None)
         activation = kwargs.pop("activation", None)
 
-        self.conv = nn.Conv2d(*args, **kwargs)
+        super().__init__(*args, **kwargs)
+
         self.norm = norm
         self.activation = activation
 
-    @property
-    def weight(self):
-        return self.conv.weight
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Optional empty-input handling, preserving old behavior
+        if not torch.jit.is_scripting():
+            is_dynamo_compiling = _check_if_dynamo_compiling()
+            if not is_dynamo_compiling:
+                with warnings.catch_warnings(record=True):
+                    if x.numel() == 0 and self.training:
+                        assert not isinstance(
+                            self.norm, nn.SyncBatchNorm
+                        ), "SyncBatchNorm does not support empty inputs!"
 
-    @property
-    def bias(self):
-        return self.conv.bias
+        # Important: use parent forward, not raw F.conv2d
+        x = super().forward(x)
 
-    def forward(self, x):
-        x = self.conv(x)
         if self.norm is not None:
             x = self.norm(x)
+
         if self.activation is not None:
             x = self.activation(x)
-        return x
 
+        return x
 
 # class Conv2d(torch.nn.Conv2d):
 #     """
@@ -95,18 +108,18 @@ class Conv2d(nn.Module):
 #         self.activation = activation
 
 #     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         x = F.conv2d(
-#             x, self.weight, self.bias,
-#             self.stride, self.padding, self.dilation, self.groups
-#         )
+#     x = F.conv2d(
+#         x, self.weight, self.bias,
+#         self.stride, self.padding, self.dilation, self.groups
+#     )
 
-#         if self.norm is not None:
-#             x = self.norm(x)
+#     if self.norm is not None:
+#         x = self.norm(x)
 
-#         if self.activation is not None:
-#             x = self.activation(x)
+#     if self.activation is not None:
+#         x = self.activation(x)
 
-#         return x
+#     return x
 
     # def forward(self, x: torch.Tensor) -> torch.Tensor:
     #     """
