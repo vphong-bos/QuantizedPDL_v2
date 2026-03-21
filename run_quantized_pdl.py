@@ -142,7 +142,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--adaround_num_iterations",
         type=int,
-        default=10000,
+        default=10,
         help="number of iterations for AdaRound",
     )
     parser.add_argument(
@@ -305,23 +305,23 @@ def main(args):
         device=args.device,
     )
     model = model.to(args.device).eval()
+    dummy_input = torch.randn(1, 3, args.image_height, args.image_width, device=args.device)
 
     if args.enable_cle:
         print("Applying Cross-Layer Equalization (CLE)...")
         cle_start = time.time()
 
-        model = model.cpu().eval()
-        dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
+        model = model.to(args.device).eval()
 
         cle_wrapper = AimetTraceWrapper(
             model=model,
             model_category_const=model_category_const,
-        ).cpu().eval()
+        ).to(args.device).eval()
 
         equalize_model(
             cle_wrapper,
             input_shapes=(1, 3, args.image_height, args.image_width),
-            dummy_input=dummy_input_cpu,
+            dummy_input=dummy_input,
         )
 
         model = model.to(args.device).eval()
@@ -348,16 +348,16 @@ def main(args):
     wrapped_model = AimetTraceWrapper(
         model=model,
         model_category_const=model_category_const,
-    ).cpu().eval()
+    ).to(args.device).eval()
 
     if args.enable_bn_fold:
         print("Applying batch norm folding...")
-        dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
+        # dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
 
         fold_all_batch_norms(
             model=wrapped_model,
             input_shapes=(1, 3, args.image_height, args.image_width),
-            dummy_input=dummy_input_cpu,
+            dummy_input=dummy_input,
         )
     else:
         print("BN folding disabled")
@@ -366,7 +366,7 @@ def main(args):
         print("Applying Bias Correction...")
         bc_start = time.time()
 
-        bc_model = copy.deepcopy(wrapped_model).cpu().eval()
+        bc_model = copy.deepcopy(wrapped_model).to(args.device).eval()
 
         bc_model = apply_bias_correction(
             model=bc_model,
@@ -394,7 +394,7 @@ def main(args):
 
     if args.enable_adaround:
         print("Applying AdaRound...")
-        dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
+        # dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
 
         adaround_params = AdaroundParameters(
             data_loader=calib_loader,
@@ -416,10 +416,10 @@ def main(args):
                     print("Ignoring AdaRound for:", name, module)
                     problem_layers.append(module)
 
-        wrapped_model = wrapped_model.cpu().eval()
+        wrapped_model = wrapped_model.to(args.device).eval()
         wrapped_model = Adaround.apply_adaround(
             model=wrapped_model,
-            dummy_input=dummy_input_cpu,
+            dummy_input=dummy_input,
             params=adaround_params,
             path=args.adaround_path,
             filename_prefix=args.adaround_prefix,
@@ -523,18 +523,18 @@ def main(args):
 
     if not args.no_export:
         print("Exporting quantized model to ONNX QDQ...")
-        sim.model.cpu().eval()
+        sim.model.to(args.device).eval()
 
-        cpu_dummy_input = torch.randn(
-            1, 3, args.image_height, args.image_width, device="cpu"
-        )
+        # cpu_dummy_input = torch.randn(
+        #     1, 3, args.image_height, args.image_width, device="cpu"
+        # )
 
         os.makedirs(args.export_path, exist_ok=True)
         onnx_path = os.path.join(args.export_path, f"{args.export_prefix}.onnx")
 
         aimet_onnx.export(
             sim.model,
-            cpu_dummy_input,
+            dummy_input,
             onnx_path,
             input_names=["input"],
             output_names=["output"],
