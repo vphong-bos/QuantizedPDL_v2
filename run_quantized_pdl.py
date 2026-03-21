@@ -406,6 +406,17 @@ def main(args):
         problem_layers = []
 
         for name, module in wrapped_model.named_modules():
+        cls = module.__class__
+        if "Conv" in cls.__name__:
+            print(
+                f"name={name} | type={cls} | "
+                f"in={getattr(module, 'in_channels', None)} | "
+                f"out={getattr(module, 'out_channels', None)} | "
+                f"kernel={getattr(module, 'kernel_size', None)} | "
+                f"stride={getattr(module, 'stride', None)}"
+            )
+
+        for name, module in wrapped_model.named_modules():
             if isinstance(module, Conv2d):
                 if (
                     module.in_channels == 2048
