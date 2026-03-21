@@ -403,6 +403,19 @@ def main(args):
             forward_fn=adaround_forward_fn,
         )
 
+        problem_layers = []
+
+        for name, module in wrapped_model.named_modules():
+            if isinstance(module, Conv2d):
+                if (
+                    module.in_channels == 2048
+                    and module.out_channels == 256
+                    and module.kernel_size == (1, 1)
+                    and module.stride == (1, 1)
+                ):
+                    print("Ignoring AdaRound for:", name, module)
+                    problem_layers.append(module)
+
         wrapped_model = wrapped_model.cpu().eval()
         wrapped_model = Adaround.apply_adaround(
             model=wrapped_model,
@@ -413,6 +426,7 @@ def main(args):
             default_param_bw=args.default_param_bw,
             default_quant_scheme=args.quant_scheme,
             default_config_file=args.config_file,
+            ignore_quant_ops_list=problem_layers,
         )
 
         wrapped_model = wrapped_model.to(args.device).eval()
