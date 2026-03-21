@@ -392,9 +392,10 @@ def main(args):
 
     wrapped_model = wrapped_model.to(args.device).eval()
 
+    adaround_encoding_path = None
+
     if args.enable_adaround:
         print("Applying AdaRound...")
-        # dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
 
         adaround_params = AdaroundParameters(
             data_loader=calib_loader,
@@ -406,19 +407,25 @@ def main(args):
         problem_layers = []
 
         for name, module in wrapped_model.named_modules():
-            if isinstance(module, Conv2d):
-                if (
-                    module.in_channels == 2048
-                    and module.out_channels == 256
-                    and module.kernel_size == (1, 1)
-                    and module.stride == (1, 1)
-                ):
-                    print("Ignoring AdaRound for:", name, module)
-                    problem_layers.append(module)
+            in_ch = getattr(module, "in_channels", None)
+            out_ch = getattr(module, "out_channels", None)
+            kernel = getattr(module, "kernel_size", None)
+            stride = getattr(module, "stride", None)
 
-        wrapped_model = wrapped_model.to(args.device).eval()
-        wrapped_model = Adaround.apply_adaround(
-            model=wrapped_model,
+            if (
+                in_ch == 2048
+                and out_ch == 256
+                and kernel == (1, 1)
+                and stride == (1, 1)
+            ):
+                print("Ignoring AdaRound for:", name, module, module.__class__)
+                problem_layers.append(module)
+
+        # Run AdaRound on a temporary copy / instance only to generate encodings
+        adaround_model = wrapped_model.to(args.device).eval()
+
+        _ = Adaround.apply_adaround(
+            model=adaround_model,
             dummy_input=dummy_input,
             params=adaround_params,
             path=args.adaround_path,
@@ -429,11 +436,17 @@ def main(args):
             ignore_quant_ops_list=problem_layers,
         )
 
-        wrapped_model = wrapped_model.to(args.device).eval()
-        print(
-            f"AdaRound finished. Encodings saved under: "
-            f"{os.path.join(args.adaround_path, args.adaround_prefix)}*.encodings"
+        adaround_encoding_path = os.path.join(
+            args.adaround_path,
+            f"{args.adaround_prefix}.encodings"
         )
+
+        print(f"AdaRound finished. Encodings saved to: {adaround_encoding_path}")
+
+        wrapped_model = AimetTraceWrapper(
+            model=model,
+            model_category_const=model_category_const,
+        ).to(args.device).eval()
     else:
         print("AdaRound disabled")
 
@@ -499,6 +512,10 @@ def main(args):
         config_file=args.config_file,
         skip_layer_names=skip_layer_names
     )
+
+    if adaround_encoding_path is not None:
+        print(f"Loading AdaRound parameter encodings from: {adaround_encoding_path}")
+        sim.set_and_freeze_param_encodings(adaround_encoding_path)
 
     print("Computing encodings with calibration data...")
     calib_start = time.time()
