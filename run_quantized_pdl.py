@@ -486,8 +486,6 @@ def main(args):
         skip_layer_names=skip_layer_names
     )
 
-
-
     print("Computing encodings with calibration data...")
     calib_start = time.time()
     sim.compute_encodings(
