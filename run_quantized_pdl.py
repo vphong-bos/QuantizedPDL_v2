@@ -466,9 +466,9 @@ def main(args):
 
     skip_layer_names = [
         # "model.backbone.stem.conv1",
-        "model.backbone.stem.conv1.norm",
+        # "model.backbone.stem.conv1.norm",
         # "model.backbone.stem.conv2",
-        "model.backbone.stem.conv2.norm",
+        # "model.backbone.stem.conv2.norm",
         # "model.backbone.stem.conv3",
     ]
 
