@@ -312,8 +312,11 @@ class PanopticDeepLabSemSegHead(DeepLabV3PlusHead):
         )
 
         self.predictor = Conv2d(head_channels, num_classes, kernel_size=1)
+        # nn.init.normal_(self.predictor.weight, 0, 0.001)
+        # nn.init.constant_(self.predictor.bias, 0)
         nn.init.normal_(self.predictor.weight, 0, 0.001)
-        nn.init.constant_(self.predictor.bias, 0)
+        if self.predictor.bias is not None:
+            nn.init.constant_(self.predictor.bias, 0)
 
         if loss_type == "cross_entropy":
             self.loss = nn.CrossEntropyLoss(reduction="mean", ignore_index=ignore_value)
