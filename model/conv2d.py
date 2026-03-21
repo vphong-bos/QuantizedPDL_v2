@@ -24,6 +24,8 @@ def _check_if_dynamo_compiling() -> bool:
 
 import torch.nn as nn
 
+import torch.nn as nn
+
 class Conv2d(nn.Module):
     def __init__(
         self,
@@ -52,6 +54,42 @@ class Conv2d(nn.Module):
         self.norm = norm
         self.activation = activation
 
+    @property
+    def weight(self):
+        return self.conv.weight
+
+    @property
+    def bias(self):
+        return self.conv.bias
+
+    @property
+    def in_channels(self):
+        return self.conv.in_channels
+
+    @property
+    def out_channels(self):
+        return self.conv.out_channels
+
+    @property
+    def kernel_size(self):
+        return self.conv.kernel_size
+
+    @property
+    def stride(self):
+        return self.conv.stride
+
+    @property
+    def padding(self):
+        return self.conv.padding
+
+    @property
+    def dilation(self):
+        return self.conv.dilation
+
+    @property
+    def groups(self):
+        return self.conv.groups
+
     def forward(self, x):
         x = self.conv(x)
         if self.norm is not None:
@@ -59,7 +97,6 @@ class Conv2d(nn.Module):
         if self.activation is not None:
             x = self.activation(x)
         return x
-
 # class Conv2d(nn.Conv2d):
 #     """
 #     Conv2d compatible with existing checkpoints.
