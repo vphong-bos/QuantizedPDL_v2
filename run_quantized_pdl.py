@@ -23,10 +23,12 @@ from utils.image_loader import load_images
 from evaluation.eval_dataset import build_eval_loader
 from evaluation.eval_metrics import evaluate_model
 
-from aimet_torch.batch_norm_fold import fold_all_batch_norms
+from aimet_torch.batch_norm_fold import fold_all_batch_norms, fold_all_batch_norms_to_scale
 from aimet_torch.cross_layer_equalization import equalize_model
 from aimet_torch.adaround.adaround_weight import Adaround, AdaroundParameters
 from aimet_torch.quant_analyzer import QuantAnalyzer
+from aimet_torch.seq_mse import apply_seq_mse, SeqMseParams
+from aimet_torch.bn_reestimation import reestimate_bn_stats
 from aimet_common.utils import CallbackFunc
 from aimet_torch import quantsim, onnx
 
@@ -136,13 +138,13 @@ def parse_args(argv=None):
     parser.add_argument(
         "--adaround_num_batches",
         type=int,
-        default=32,
+        default=1000,
         help="number of calibration batches to use for AdaRound",
     )
     parser.add_argument(
         "--adaround_num_iterations",
         type=int,
-        default=10,
+        default=10000,
         help="number of iterations for AdaRound",
     )
     parser.add_argument(
@@ -218,10 +220,54 @@ def parse_args(argv=None):
         help="max eval samples for QuantAnalyzer, -1 means full split",
     )
 
+    parser.add_argument(
+        "--enable_seq_mse",
+        action="store_true",
+        help="apply AIMET Sequential MSE on QuantSim before computing encodings",
+    )
+    parser.add_argument(
+        "--seq_mse_num_batches",
+        type=int,
+        default=100,
+        help="number of calibration batches to use for Sequential MSE",
+    )
+    parser.add_argument(
+        "--seq_mse_num_candidates",
+        type=int,
+        default=20,
+        help="number of candidate encodings for Sequential MSE search",
+    )
+    parser.add_argument(
+        "--seq_mse_inp_symmetry",
+        type=str,
+        default="symqt",
+        choices=["asym", "symfp", "symqt"],
+        help="input symmetry mode for Sequential MSE",
+    )
+    parser.add_argument(
+        "--seq_mse_loss_fn",
+        type=str,
+        default="mse",
+        choices=["mse", "l1", "sqnr"],
+        help="loss function for Sequential MSE",
+    )
+
+    parser.add_argument(
+        "--enable_bn_reestimation",
+        action="store_true",
+        help="re-estimate BN stats on quant sim model before export",
+    )
+    parser.add_argument(
+        "--bn_reest_num_batches",
+        type=int,
+        default=64,
+        help="number of calibration batches to use for BN re-estimation",
+    )
+
     return parser.parse_args(argv)
 
 
-def adaround_forward_fn(model, inputs):
+def aimet_forward_fn(model, inputs):
     if isinstance(inputs, dict):
         images = inputs["image"]
     elif isinstance(inputs, (list, tuple)):
@@ -231,7 +277,6 @@ def adaround_forward_fn(model, inputs):
 
     images = images.to(next(model.parameters()).device)
     return model(images)
-
 
 def analyzer_forward_pass(model, callback_args):
     calib_loader, device, max_batches = callback_args
@@ -269,6 +314,9 @@ def analyzer_eval_callback(model, callback_args):
 def main(args):
     if args.batch_size < 1:
         raise ValueError("batch_size must be >= 1")
+
+    if args.enable_seq_mse and args.enable_adaround:
+        raise ValueError("Enable either --enable_seq_mse or --enable_adaround, not both.")
 
     if args.save_quant_checkpoint is not None:
         save_dir = os.path.dirname(args.save_quant_checkpoint)
@@ -401,7 +449,7 @@ def main(args):
             data_loader=calib_loader,
             num_batches=min(args.adaround_num_batches, len(calib_loader)),
             default_num_iterations=args.adaround_num_iterations,
-            forward_fn=adaround_forward_fn,
+            forward_fn=aimet_forward_fn,
         )
 
         problem_layers = []
@@ -517,6 +565,48 @@ def main(args):
         print(f"Loading AdaRound parameter encodings from: {adaround_encoding_path}")
         sim.set_and_freeze_param_encodings(adaround_encoding_path)
 
+    if args.enable_seq_mse:
+        print("Applying Sequential MSE...")
+
+        seq_mse_num_batches = min(args.seq_mse_num_batches, len(calib_loader))
+
+        seq_mse_params = SeqMseParams(
+            num_batches=seq_mse_num_batches,
+            num_candidates=args.seq_mse_num_candidates,
+            inp_symmetry=args.seq_mse_inp_symmetry,
+            loss_fn=args.seq_mse_loss_fn,
+            forward_fn=aimet_forward_fn,
+        )
+
+        # Reuse the same exclusion list you built for problematic layers if needed.
+        seq_mse_excluded_modules = []
+        for name, module in wrapped_model.named_modules():
+            in_ch = getattr(module, "in_channels", None)
+            out_ch = getattr(module, "out_channels", None)
+            kernel = getattr(module, "kernel_size", None)
+            stride = getattr(module, "stride", None)
+
+            if (
+                in_ch == 2048
+                and out_ch == 256
+                and kernel == (1, 1)
+                and stride == (1, 1)
+            ):
+                print("Ignoring SeqMSE for:", name, module, module.__class__)
+                seq_mse_excluded_modules.append(module)
+
+        apply_seq_mse(
+            model=wrapped_model,
+            sim=sim,
+            data_loader=calib_loader,
+            params=seq_mse_params,
+            modules_to_exclude=seq_mse_excluded_modules if seq_mse_excluded_modules else None,
+        )
+
+        print("Sequential MSE finished.")
+    else:
+        print("Sequential MSE disabled")
+
     print("Computing encodings with calibration data...")
     calib_start = time.time()
     sim.compute_encodings(
@@ -525,6 +615,27 @@ def main(args):
     )
     calib_time = time.time() - calib_start
     print(f"Calibration finished in {calib_time:.2f} s")
+
+    if args.enable_bn_reestimation:
+        print("Applying BatchNorm re-estimation...")
+        bn_start = time.time()
+
+        bn_reest_num_batches = min(args.bn_reest_num_batches, len(calib_loader))
+
+        reestimate_bn_stats(
+            sim.model,
+            calib_loader,
+            num_batches=bn_reest_num_batches,
+            forward_fn=aimet_forward_fn,
+        )
+
+        # Fold BN effect into quantization scales on the sim
+        fold_all_batch_norms_to_scale(sim)
+
+        bn_time = time.time() - bn_start
+        print(f"BN re-estimation finished in {bn_time:.2f} s")
+    else:
+        print("BN re-estimation disabled")
 
     quantized_model = sim.model
     quantized_model.eval()
