@@ -523,7 +523,7 @@ def main(args):
             onnx_path,
             input_names=["input"],
             output_names=["output"],
-            opset_version=21,
+            opset_version=20,
             export_int32_bias=True,
             dynamo=False,   # AIMET says dynamo=True is not supported here
         )
