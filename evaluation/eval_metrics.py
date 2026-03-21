@@ -49,7 +49,6 @@ def get_semantic_logits(model_obj, image, model_category_const):
         session = model_obj["session"]
         input_name = model_obj["input_name"]
 
-        # Make sure ONNX input is CPU numpy
         if image.device.type != "cpu":
             image_np = image.detach().cpu().numpy()
         else:
@@ -57,7 +56,7 @@ def get_semantic_logits(model_obj, image, model_category_const):
 
         outputs = session.run(None, {input_name: image_np})
 
-        logits = torch.from_numpy(outputs[0]).float()  # stay on CPU
+        logits = torch.from_numpy(outputs[0]).float().to(image.device)
 
         if logits.ndim == 4 and logits.shape[1] != 19 and logits.shape[-1] == 19:
             logits = logits.permute(0, 3, 1, 2).contiguous()
@@ -65,7 +64,11 @@ def get_semantic_logits(model_obj, image, model_category_const):
         return logits
 
     raise ValueError(f"Unsupported backend: {model_obj['backend']}")
+
 def update_confusion_matrix(conf_mat, pred, target, num_classes=19, ignore_index=255):
+    if pred.device != target.device:
+        pred = pred.to(target.device)
+
     valid = target != ignore_index
     pred = pred[valid]
     target = target[valid]
