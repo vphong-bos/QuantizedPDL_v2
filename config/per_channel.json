@@ -5,14 +5,45 @@
       "is_symmetric": "False"
     },
     "params": {
-      "is_quantized": "True",
+      "is_quantized": "False",
       "is_symmetric": "True"
     },
-    "per_channel_quantization": "True",
+    "per_channel_quantization": "False",
     "unsigned_symmetric": "False"
   },
-  "params": {},
+  "params": {
+    "bias": {
+      "is_quantized": "False"
+    }
+  },
   "op_type": {
+    "Conv": {
+      "per_channel_quantization": "True",
+      "params": {
+        "weight": {
+          "is_quantized": "True",
+          "is_symmetric": "True"
+        },
+        "bias": {
+          "is_quantized": "False"
+        }
+      }
+    },
+    "Gemm": {
+      "per_channel_quantization": "True",
+      "params": {
+        "weight": {
+          "is_quantized": "True",
+          "is_symmetric": "True"
+        },
+        "bias": {
+          "is_quantized": "False"
+        }
+      }
+    },
+    "MatMul": {
+      "per_channel_quantization": "False"
+    },
     "Concat": {
       "is_output_quantized": "False"
     },
