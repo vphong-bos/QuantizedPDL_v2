@@ -38,6 +38,6 @@
     "is_input_quantized": "True"
   },
   "model_output": {
-    "is_output_quantized": "False"
+    "is_output_quantized": "True"
   }
 }
