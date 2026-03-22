@@ -5,7 +5,7 @@
       "is_symmetric": "False"
     },
     "params": {
-      "is_quantized": "False",
+      "is_quantized": "True",
       "is_symmetric": "True"
     },
     "per_channel_quantization": "False",
@@ -18,28 +18,10 @@
   },
   "op_type": {
     "Conv": {
-      "per_channel_quantization": "True",
-      "params": {
-        "weight": {
-          "is_quantized": "True",
-          "is_symmetric": "True"
-        },
-        "bias": {
-          "is_quantized": "False"
-        }
-      }
+      "per_channel_quantization": "True"
     },
     "Gemm": {
-      "per_channel_quantization": "True",
-      "params": {
-        "weight": {
-          "is_quantized": "True",
-          "is_symmetric": "True"
-        },
-        "bias": {
-          "is_quantized": "False"
-        }
-      }
+      "per_channel_quantization": "True"
     },
     "MatMul": {
       "per_channel_quantization": "False"
