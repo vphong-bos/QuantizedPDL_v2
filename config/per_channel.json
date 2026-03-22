@@ -2,7 +2,7 @@
   "defaults": {
     "ops": {
       "is_output_quantized": "True",
-      "is_symmetric": "True"
+      "is_symmetric": "False"
     },
     "params": {
       "is_quantized": "True",
