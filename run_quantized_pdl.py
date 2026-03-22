@@ -398,6 +398,19 @@ def main(args):
         model_category_const=model_category_const,
     ).to(args.device).eval()
 
+    EXCLUDE_LAYERS = {
+        "model.semantic_head.decoder.res5.project_conv.convs.0",
+        "model.semantic_head.decoder.res5.project_conv.convs.4.1",
+        "model.instance_head.decoder.res5.project_conv.convs.0",
+        "model.instance_head.decoder.res5.project_conv.convs.4.1",
+    }
+
+    excluded_modules = []
+    for name, module in wrapped_model.named_modules():
+        if name in EXCLUDE_LAYERS:
+            print(f"Ignoring SeqMSE for: {name} {module} {module.__class__}")
+            excluded_modules.append(module)
+
     if args.enable_bn_fold:
         print("Applying batch norm folding...")
         # dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
@@ -452,22 +465,22 @@ def main(args):
             forward_fn=aimet_forward_fn,
         )
 
-        problem_layers = []
+        # problem_layers = []
 
-        for name, module in wrapped_model.named_modules():
-            in_ch = getattr(module, "in_channels", None)
-            out_ch = getattr(module, "out_channels", None)
-            kernel = getattr(module, "kernel_size", None)
-            stride = getattr(module, "stride", None)
+        # for name, module in wrapped_model.named_modules():
+        #     in_ch = getattr(module, "in_channels", None)
+        #     out_ch = getattr(module, "out_channels", None)
+        #     kernel = getattr(module, "kernel_size", None)
+        #     stride = getattr(module, "stride", None)
 
-            if (
-                in_ch == 2048
-                and out_ch == 256
-                and kernel == (1, 1)
-                and stride == (1, 1)
-            ):
-                print("Ignoring AdaRound for:", name, module, module.__class__)
-                problem_layers.append(module)
+        #     if (
+        #         in_ch == 2048
+        #         and out_ch == 256
+        #         and kernel == (1, 1)
+        #         and stride == (1, 1)
+        #     ):
+        #         print("Ignoring AdaRound for:", name, module, module.__class__)
+        #         problem_layers.append(module)
 
         # Run AdaRound on a temporary copy / instance only to generate encodings
         adaround_model = wrapped_model.to(args.device).eval()
@@ -481,7 +494,7 @@ def main(args):
             default_param_bw=args.default_param_bw,
             default_quant_scheme=args.quant_scheme,
             default_config_file=args.config_file,
-            ignore_quant_ops_list=problem_layers,
+            ignore_quant_ops_list=excluded_modules,
         )
 
         adaround_encoding_path = os.path.join(
@@ -579,29 +592,29 @@ def main(args):
         )
 
         # Reuse the same exclusion list you built for problematic layers if needed.
-        seq_mse_excluded_modules = []
-        for name, module in wrapped_model.named_modules():
-            in_ch = getattr(module, "in_channels", None)
-            out_ch = getattr(module, "out_channels", None)
-            kernel = getattr(module, "kernel_size", None)
-            stride = getattr(module, "stride", None)
+        # seq_mse_excluded_modules = []
+        # for name, module in wrapped_model.named_modules():
+        #     in_ch = getattr(module, "in_channels", None)
+        #     out_ch = getattr(module, "out_channels", None)
+        #     kernel = getattr(module, "kernel_size", None)
+        #     stride = getattr(module, "stride", None)
 
-            if (
-                in_ch == 2048
-                and out_ch == 256
-                and kernel == (1, 1)
-                and stride == (1, 1)
-            ):
-                print("Ignoring SeqMSE for:", name, module, module.__class__)
-                seq_mse_excluded_modules.append(module)
+        #     if (
+        #         in_ch == 2048
+        #         and out_ch == 256
+        #         and kernel == (1, 1)
+        #         and stride == (1, 1)
+        #     ):
+        #         print("Ignoring SeqMSE for:", name, module, module.__class__)
+        #         seq_mse_excluded_modules.append(module)
 
         apply_seq_mse(
             model=wrapped_model,
             sim=sim,
             data_loader=calib_loader,
             params=seq_mse_params,
-            # modules_to_exclude=seq_mse_excluded_modules if seq_mse_excluded_modules else None,
-            modules_to_exclude=None,
+            modules_to_exclude=excluded_modules if excluded_modules else None,
+            # modules_to_exclude=None,
         )
 
         print("Sequential MSE finished.")
