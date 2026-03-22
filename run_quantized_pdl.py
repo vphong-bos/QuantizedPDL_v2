@@ -600,7 +600,8 @@ def main(args):
             sim=sim,
             data_loader=calib_loader,
             params=seq_mse_params,
-            modules_to_exclude=seq_mse_excluded_modules if seq_mse_excluded_modules else None,
+            # modules_to_exclude=seq_mse_excluded_modules if seq_mse_excluded_modules else None,
+            modules_to_exclude=None,
         )
 
         print("Sequential MSE finished.")
