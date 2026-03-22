@@ -8,7 +8,7 @@
       "is_quantized": "True",
       "is_symmetric": "True"
     },
-    "per_channel_quantization": "False",
+    "per_channel_quantization": "True",
     "unsigned_symmetric": "False"
   },
   "params": {
@@ -17,30 +17,27 @@
     }
   },
   "op_type": {
-    "Conv": {
-      "per_channel_quantization": "True"
-    },
     "Gemm": {
       "per_channel_quantization": "True"
     },
     "MatMul": {
-      "per_channel_quantization": "False"
+      "per_channel_quantization": "True"
     },
     "Concat": {
-      "is_output_quantized": "False"
+      "is_output_quantized": "True"
     },
     "Resize": {
       "is_output_quantized": "False"
     },
     "Mul": {
-      "is_output_quantized": "False"
+      "is_output_quantized": "True"
     }
   },
   "supergroups": [],
   "model_input": {
-    "is_input_quantized": "True"
+    "is_input_quantized": "False"
   },
   "model_output": {
-    "is_output_quantized": "True"
+    "is_output_quantized": "False"
   }
 }
