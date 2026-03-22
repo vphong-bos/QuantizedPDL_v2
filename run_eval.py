@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--cityscapes_root", type=str, required=True)
 
-    parser.add_argument("--fp32_weights", type=str, required=True,
+    parser.add_argument("--fp32_weights", type=str,
                         help="Path to FP32 .pkl weights")
     parser.add_argument("--quant_weights", type=str, required=True,
                         help="Path to quantized model: AIMET checkpoint (.pt/.pth/.pkl) or ONNX (.onnx)")
