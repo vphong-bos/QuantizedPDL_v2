@@ -35,7 +35,7 @@
   },
   "supergroups": [],
   "model_input": {
-    "is_input_quantized": "False"
+    "is_input_quantized": "True"
   },
   "model_output": {
     "is_output_quantized": "False"

@@ -408,7 +408,7 @@ def main(args):
     excluded_modules = []
     for name, module in wrapped_model.named_modules():
         if name in EXCLUDE_LAYERS:
-            print(f"Ignoring SeqMSE for: {name} {module} {module.__class__}")
+            print(f"Ignoring SeqMSE, AdaRound for: {name} {module} {module.__class__}")
             excluded_modules.append(module)
 
     if args.enable_bn_fold:
