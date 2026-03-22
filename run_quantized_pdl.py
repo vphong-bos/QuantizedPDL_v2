@@ -228,7 +228,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--seq_mse_num_batches",
         type=int,
-        default=128,
+        default=256,
         help="number of calibration batches to use for Sequential MSE",
     )
     parser.add_argument(
@@ -613,8 +613,8 @@ def main(args):
             sim=sim,
             data_loader=calib_loader,
             params=seq_mse_params,
-            modules_to_exclude=excluded_modules if excluded_modules else None,
-            # modules_to_exclude=None,
+            # modules_to_exclude=excluded_modules if excluded_modules else None,
+            modules_to_exclude=None,
         )
 
         print("Sequential MSE finished.")
