@@ -757,28 +757,85 @@ def create_optimized_variants(
     os.makedirs(output_dir, exist_ok=True)
     generated = {}
 
+    def maybe_make_fixed_tmp(tag: str) -> str:
+        if not fix_input_shape_flag:
+            return input_model_path
+
+        fixed_tmp = os.path.join(output_dir, f"_tmp_fixed_{tag}.onnx")
+        export_fixed_shape_copy(
+            input_path=input_model_path,
+            output_path=fixed_tmp,
+            fixed_batch=fixed_batch,
+            image_height=image_height,
+            image_width=image_width,
+        )
+        return fixed_tmp
+
     for variant in variants:
         out_path = os.path.join(output_dir, f"{variant}.onnx")
 
         try:
-            if variant == "ort_all":
-                input_for_ort = input_model_path
-                if fix_input_shape_flag:
-                    fixed_tmp = os.path.join(output_dir, "_tmp_fixed_for_ort_all.onnx")
-                    export_fixed_shape_copy(
-                        input_path=input_model_path,
-                        output_path=fixed_tmp,
-                        fixed_batch=fixed_batch,
-                        image_height=image_height,
-                        image_width=image_width,
-                    )
-                    input_for_ort = fixed_tmp
+            if variant == "ort_basic":
+                input_for_ort = maybe_make_fixed_tmp("ort_basic")
+                save_ort_optimized_model(
+                    input_model_path=input_for_ort,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="basic",
+                )
 
+            elif variant == "ort_extended":
+                input_for_ort = maybe_make_fixed_tmp("ort_extended")
+                save_ort_optimized_model(
+                    input_model_path=input_for_ort,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="extended",
+                )
+
+            elif variant == "ort_all":
+                input_for_ort = maybe_make_fixed_tmp("ort_all")
                 save_ort_optimized_model(
                     input_model_path=input_for_ort,
                     output_model_path=out_path,
                     provider=provider,
                     opt_level_name="all",
+                )
+
+            elif variant == "onnxoptimizer_plus_ort_basic":
+                tmp_path = os.path.join(output_dir, "_tmp_onnxoptimizer_for_ort_basic.onnx")
+                export_onnxoptimizer_with_preset(
+                    input_path=input_model_path,
+                    output_path=tmp_path,
+                    preset=onnxoptimizer_preset,
+                    fix_input_shape_flag=fix_input_shape_flag,
+                    fixed_batch=fixed_batch,
+                    image_height=image_height,
+                    image_width=image_width,
+                )
+                save_ort_optimized_model(
+                    input_model_path=tmp_path,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="basic",
+                )
+
+            elif variant == "onnxoptimizer_plus_ort_extended":
+                tmp_path = os.path.join(output_dir, "_tmp_onnxoptimizer_for_ort_extended.onnx")
+                export_onnxoptimizer_with_preset(
+                    input_path=input_model_path,
+                    output_path=tmp_path,
+                    preset=onnxoptimizer_preset,
+                    fix_input_shape_flag=fix_input_shape_flag,
+                    fixed_batch=fixed_batch,
+                    image_height=image_height,
+                    image_width=image_width,
+                )
+                save_ort_optimized_model(
+                    input_model_path=tmp_path,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="extended",
                 )
 
             elif variant == "onnxoptimizer_plus_ort_all":
@@ -797,6 +854,44 @@ def create_optimized_variants(
                     output_model_path=out_path,
                     provider=provider,
                     opt_level_name="all",
+                )
+
+            elif variant == "onnxsim_plus_ort_basic":
+                tmp_path = os.path.join(output_dir, "_tmp_onnxsim_for_ort_basic.onnx")
+                export_onnxsim(
+                    input_path=input_model_path,
+                    output_path=tmp_path,
+                    fix_input_shape_flag=fix_input_shape_flag,
+                    fixed_batch=fixed_batch,
+                    image_height=image_height,
+                    image_width=image_width,
+                    skip_constant_folding=onnxsim_skip_constant_folding,
+                    skip_shape_inference=onnxsim_skip_shape_inference,
+                )
+                save_ort_optimized_model(
+                    input_model_path=tmp_path,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="basic",
+                )
+
+            elif variant == "onnxsim_plus_ort_extended":
+                tmp_path = os.path.join(output_dir, "_tmp_onnxsim_for_ort_extended.onnx")
+                export_onnxsim(
+                    input_path=input_model_path,
+                    output_path=tmp_path,
+                    fix_input_shape_flag=fix_input_shape_flag,
+                    fixed_batch=fixed_batch,
+                    image_height=image_height,
+                    image_width=image_width,
+                    skip_constant_folding=onnxsim_skip_constant_folding,
+                    skip_shape_inference=onnxsim_skip_shape_inference,
+                )
+                save_ort_optimized_model(
+                    input_model_path=tmp_path,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="extended",
                 )
 
             elif variant == "onnxsim_plus_ort_all":
@@ -828,7 +923,6 @@ def create_optimized_variants(
             print(f"[WARN] Failed to create {variant}: {e}")
 
     return generated
-
 
 # -----------------------------
 # evaluate_model wrapper
