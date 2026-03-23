@@ -422,13 +422,24 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 def pcc(a: np.ndarray, b: np.ndarray) -> float:
     a = flatten_float(a)
     b = flatten_float(b)
+
     if a.size == 0 or b.size == 0:
         return 1.0
-    if np.std(a) < EPS and np.std(b) < EPS:
-        return 1.0 if np.allclose(a, b, atol=1e-6, rtol=1e-6) else 0.0
-    corr = np.corrcoef(a, b)[0, 1]
-    return 0.0 if np.isnan(corr) else float(corr)
 
+    std_a = float(np.std(a))
+    std_b = float(np.std(b))
+
+    if std_a < EPS and std_b < EPS:
+        return 1.0 if np.allclose(a, b, atol=1e-6, rtol=1e-6) else 0.0
+
+    if std_a < EPS or std_b < EPS:
+        return 0.0
+
+    corr = np.corrcoef(a, b)[0, 1]
+    if np.isnan(corr) or np.isinf(corr):
+        return 0.0
+
+    return float(corr)
 
 def compare_arrays(a: np.ndarray, b: np.ndarray) -> Dict[str, float]:
     if a.shape != b.shape:
@@ -890,15 +901,22 @@ def parse_args():
         "--variants",
         nargs="+",
         default=[
-            "ort_all",
-            "onnxoptimizer_plus_ort_all",
-            "onnxsim_plus_ort_all",
+            "ort_basic",
+            "ort_extended",
+            "onnxoptimizer_plus_ort_extended",
+            "onnxsim_plus_ort_extended",
         ],
         choices=[
+            "ort_basic",
+            "ort_extended",
             "ort_all",
+            "onnxoptimizer_plus_ort_basic",
+            "onnxoptimizer_plus_ort_extended",
             "onnxoptimizer_plus_ort_all",
+            "onnxsim_plus_ort_basic",
+            "onnxsim_plus_ort_extended",
             "onnxsim_plus_ort_all",
-        ],
+        ]
     )
 
     parser.add_argument("--fix_input_shape", action="store_true")
