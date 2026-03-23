@@ -355,29 +355,6 @@ def main(args):
     model = model.to(args.device).eval()
     dummy_input = torch.randn(1, 3, args.image_height, args.image_width, device=args.device)
 
-    if args.enable_cle:
-        print("Applying Cross-Layer Equalization (CLE)...")
-        cle_start = time.time()
-
-        model = model.to(args.device).eval()
-
-        cle_wrapper = AimetTraceWrapper(
-            model=model,
-            model_category_const=model_category_const,
-        ).to(args.device).eval()
-
-        equalize_model(
-            cle_wrapper,
-            input_shapes=(1, 3, args.image_height, args.image_width),
-            dummy_input=dummy_input,
-        )
-
-        model = model.to(args.device).eval()
-        cle_time = time.time() - cle_start
-        print(f"CLE finished in {cle_time:.2f} s")
-    else:
-        print("CLE disabled")
-
     print("Collecting calibration images...")
     all_calib_images = load_images(args.calib_images, num_iters=-1, recursive=True)
     calib_images = sample_calibration_images(all_calib_images, args.num_calib, args.seed)
@@ -411,18 +388,6 @@ def main(args):
             print(f"Ignoring SeqMSE, AdaRound for: {name} {module} {module.__class__}")
             excluded_modules.append(module)
 
-    if args.enable_bn_fold:
-        print("Applying batch norm folding...")
-        # dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
-
-        fold_all_batch_norms(
-            model=wrapped_model,
-            input_shapes=(1, 3, args.image_height, args.image_width),
-            dummy_input=dummy_input,
-        )
-    else:
-        print("BN folding disabled")
-
     if args.enable_bias_correction:
         print("Applying Bias Correction...")
         bc_start = time.time()
@@ -450,6 +415,41 @@ def main(args):
         print(f"Bias Correction finished in {bc_time:.2f} s")
     else:
         print("Bias Correction disabled")
+
+    if args.enable_bn_fold:
+        print("Applying batch norm folding...")
+        # dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
+
+        fold_all_batch_norms(
+            model=wrapped_model,
+            input_shapes=(1, 3, args.image_height, args.image_width),
+            dummy_input=dummy_input,
+        )
+    else:
+        print("BN folding disabled")
+
+    if args.enable_cle:
+        print("Applying Cross-Layer Equalization (CLE)...")
+        cle_start = time.time()
+
+        model = model.to(args.device).eval()
+
+        cle_wrapper = AimetTraceWrapper(
+            model=model,
+            model_category_const=model_category_const,
+        ).to(args.device).eval()
+
+        equalize_model(
+            cle_wrapper,
+            input_shapes=(1, 3, args.image_height, args.image_width),
+            dummy_input=dummy_input,
+        )
+
+        model = model.to(args.device).eval()
+        cle_time = time.time() - cle_start
+        print(f"CLE finished in {cle_time:.2f} s")
+    else:
+        print("CLE disabled")
 
     wrapped_model = wrapped_model.to(args.device).eval()
 
