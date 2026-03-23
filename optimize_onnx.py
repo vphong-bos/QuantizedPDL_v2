@@ -198,6 +198,11 @@ def build_sample_from_loader(
     if image.dtype != np.float32:
         image = image.astype(np.float32)
 
+    # ORT model usually expects NCHW. If loader returns CHW for a single image,
+    # add batch dimension -> 1CHW.
+    if image.ndim == 3:
+        image = np.expand_dims(image, axis=0)
+
     if len(input_names) != 1:
         raise ValueError(
             f"Expected 1 ONNX input, but got {len(input_names)} inputs: {input_names}"
