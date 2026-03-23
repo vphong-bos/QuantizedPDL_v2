@@ -1090,10 +1090,10 @@ def main():
             item["total_compared_tensors"] = tensor_report["total_compared_tensors"]
 
             print("[INFO] Eval result:")
-            print(json.dumps(eval_result, indent=2))
+            print(json.dumps(to_jsonable(eval_result), indent=2))
 
             print("[INFO] Model stats:")
-            print(json.dumps(item["model_stats"], indent=2))
+            print(json.dumps(to_jsonable(item["model_stats"]), indent=2))
 
             print("[INFO] Final output summary:")
             for out_name, metrics in final_output_report.items():
