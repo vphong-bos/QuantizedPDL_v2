@@ -113,7 +113,7 @@ def compute_miou_from_confmat(conf_mat):
         "IoU_per_class": (iou * 100.0).cpu().numpy(),
     }
 
-def evaluate_model(model_obj, model_category_const, loader, device, max_samples=-1):
+def evaluate_model(model, model_category_const, loader, device, max_samples=-1):
     if model_obj["backend"] == "torch":
         model_obj["model"].eval()
 
