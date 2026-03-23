@@ -3,9 +3,10 @@ import os
 import time
 
 import cv2
+import numpy as np
 import torch
-import torchvision.transforms as T
 from PIL import Image
+import onnxruntime as ort
 
 from utils.demo_utils import (
     create_deeplab_v3plus_visualization,
@@ -14,7 +15,8 @@ from utils.demo_utils import (
 )
 from model.pdl import (
     DEEPLAB_V3_PLUS,
-    build_model
+    PANOPTIC_DEEPLAB,
+    build_model,
 )
 
 from utils.image_loader import load_images, preprocess_image
@@ -30,7 +32,12 @@ center_threshold = 0.05
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        choices=["cpu", "cuda"],
+    )
     parser.add_argument("-n", "--num_iters", type=int, default=-1, help="number of images to process")
     parser.add_argument("--batch_size", type=int, default=1, help="batch size, currently only 1 is supported")
     parser.add_argument("--image_height", type=int, default=512, help="input image height")
@@ -46,16 +53,114 @@ def parse_args(argv=None):
         choices=["DEEPLAB_V3_PLUS", "PANOPTIC_DEEPLAB"],
         help="semantic-only or full panoptic model",
     )
+    parser.add_argument(
+        "--onnx_provider",
+        type=str,
+        default="CPUExecutionProvider",
+        choices=["CPUExecutionProvider", "CUDAExecutionProvider"],
+        help="ONNX Runtime provider when weights_path is .onnx",
+    )
 
     return parser.parse_args(argv)
 
-def run_inference(model, torch_input, model_category_const):
-    with torch.no_grad():
-        semantic_logits, center_heatmap, offset_map, _ = model(torch_input)
 
-    if model_category_const == DEEPLAB_V3_PLUS:
-        return semantic_logits
-    return semantic_logits, center_heatmap, offset_map, _
+def load_model(args):
+    ext = os.path.splitext(args.weights_path)[1].lower()
+
+    if ext == ".onnx":
+        print("Loading ONNX model...")
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+
+        session = ort.InferenceSession(
+            args.weights_path,
+            sess_options=so,
+            providers=[args.onnx_provider],
+        )
+
+        input_name = session.get_inputs()[0].name
+        output_names = [o.name for o in session.get_outputs()]
+
+        print(f"[ONNX] provider: {args.onnx_provider}")
+        print(f"[ONNX] input: {input_name}")
+        print(f"[ONNX] outputs: {output_names}")
+
+        model_category_const = (
+            PANOPTIC_DEEPLAB if args.model_category == "PANOPTIC_DEEPLAB" else DEEPLAB_V3_PLUS
+        )
+
+        return {
+            "backend": "onnx",
+            "session": session,
+            "input_name": input_name,
+            "output_names": output_names,
+            "model": None,
+            "model_category_const": model_category_const,
+        }
+
+    print("Loading PyTorch model...")
+    model, model_category_const = build_model(
+        weights_path=args.weights_path,
+        model_category=args.model_category,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        device=args.device,
+    )
+
+    return {
+        "backend": "torch",
+        "model": model,
+        "session": None,
+        "input_name": None,
+        "output_names": None,
+        "model_category_const": model_category_const,
+    }
+
+
+def run_inference(model_obj, torch_input, model_category_const):
+    if model_obj["backend"] == "torch":
+        with torch.no_grad():
+            semantic_logits, center_heatmap, offset_map, _ = model_obj["model"](torch_input)
+
+        if model_category_const == DEEPLAB_V3_PLUS:
+            return semantic_logits
+
+        return semantic_logits, center_heatmap, offset_map, _
+
+    elif model_obj["backend"] == "onnx":
+        session = model_obj["session"]
+        input_name = model_obj["input_name"]
+
+        # Keep ONNX input on CPU as numpy
+        input_np = torch_input.detach().cpu().numpy().astype(np.float32, copy=False)
+        outputs = session.run(None, {input_name: input_np})
+
+        # Expected:
+        # Deeplab: [semantic]
+        # Panoptic: [semantic, center, offset, ...]
+        if model_category_const == DEEPLAB_V3_PLUS:
+            semantic_logits = torch.from_numpy(outputs[0]).float()
+            if semantic_logits.ndim == 4 and semantic_logits.shape[1] != 19 and semantic_logits.shape[-1] == 19:
+                semantic_logits = semantic_logits.permute(0, 3, 1, 2).contiguous()
+            return semantic_logits
+
+        semantic_logits = torch.from_numpy(outputs[0]).float()
+        center_heatmap = torch.from_numpy(outputs[1]).float()
+        offset_map = torch.from_numpy(outputs[2]).float()
+        extra = torch.from_numpy(outputs[3]).float() if len(outputs) > 3 else None
+
+        if semantic_logits.ndim == 4 and semantic_logits.shape[1] != 19 and semantic_logits.shape[-1] == 19:
+            semantic_logits = semantic_logits.permute(0, 3, 1, 2).contiguous()
+
+        if center_heatmap.ndim == 4 and center_heatmap.shape[1] not in (1, 2) and center_heatmap.shape[-1] in (1, 2):
+            center_heatmap = center_heatmap.permute(0, 3, 1, 2).contiguous()
+
+        if offset_map.ndim == 4 and offset_map.shape[1] not in (1, 2) and offset_map.shape[-1] in (1, 2):
+            offset_map = offset_map.permute(0, 3, 1, 2).contiguous()
+
+        return semantic_logits, center_heatmap, offset_map, extra
+
+    raise ValueError(f"Unsupported backend: {model_obj['backend']}")
 
 
 def save_visualization(
@@ -100,19 +205,15 @@ def save_visualization(
     save_predictions(output_dir, image_name, original_image, vis)
     print(f"Saved output for image {image_name} to {output_dir}")
 
+
 def panoptic_deeplab_runner(args):
     if args.batch_size != 1:
-        raise ValueError("This simplified PyTorch runner currently supports batch_size=1 only.")
+        raise ValueError("This runner currently supports batch_size=1 only.")
 
     os.makedirs(args.output_path, exist_ok=True)
 
-    model, model_category_const = build_model(
-        weights_path=args.weights_path,
-        model_category=args.model_category,
-        image_height=args.image_height,
-        image_width=args.image_width,
-        device=args.device,
-    )
+    model_obj = load_model(args)
+    model_category_const = model_obj["model_category_const"]
 
     images = load_images(args.images, args.num_iters)
     if len(images) == 0:
@@ -121,15 +222,25 @@ def panoptic_deeplab_runner(args):
     total_start = time.time()
 
     for i, image_path in enumerate(images, start=1):
+        # For ONNX CPU provider, keep preprocessing on CPU
+        preprocess_device = args.device
+        if model_obj["backend"] == "onnx" and args.onnx_provider == "CPUExecutionProvider":
+            preprocess_device = "cpu"
+
         original_image, torch_input = preprocess_image(
             image_path=image_path,
             input_width=args.image_width,
             input_height=args.image_height,
-            device=args.device,
+            device=preprocess_device,
         )
 
+        if model_obj["backend"] == "torch" and args.device == "cuda":
+            torch.cuda.synchronize()
+
         start_time = time.time()
-        output = run_inference(model, torch_input, model_category_const)
+        output = run_inference(model_obj, torch_input, model_category_const)
+        if model_obj["backend"] == "torch" and args.device == "cuda":
+            torch.cuda.synchronize()
         end_time = time.time()
 
         print(f"[{i}/{len(images)}] {os.path.basename(image_path)}: {(end_time - start_time) * 1000:.2f} ms")
@@ -148,6 +259,9 @@ def panoptic_deeplab_runner(args):
 
     print("\n================ Execution Results ================")
     print(f"Model Category: {args.model_category}")
+    print(f"Backend: {model_obj['backend']}")
+    if model_obj["backend"] == "onnx":
+        print(f"ONNX Provider: {args.onnx_provider}")
     print(f"Number of Inputs: {len(images)}")
     print(f"Total Execution Time: {total_time:.4f} s")
     print(f"Samples per Second: {fps:.2f} samples/s")
