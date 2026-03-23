@@ -2,12 +2,16 @@
 import argparse
 import copy
 import json
+import os
 from typing import Dict, List
 
 import numpy as np
 import onnx
 import onnxruntime as ort
+import torch
 from onnx import helper, shape_inference
+
+from evaluation.eval_dataset import build_eval_loader
 
 EPS = 1e-12
 
@@ -71,17 +75,63 @@ def list_output_names(session: ort.InferenceSession) -> List[str]:
     return [x.name for x in session.get_outputs()]
 
 
-def load_sample(sample_path: str, expected_input_names: List[str]) -> Dict[str, np.ndarray]:
-    if sample_path.endswith(".npz"):
-        data = np.load(sample_path, allow_pickle=False)
-        sample = {}
-        for name in expected_input_names:
-            if name not in data:
-                raise ValueError(f"Missing input '{name}' in {sample_path}")
-            sample[name] = data[name]
-        return sample
+def _to_numpy(x):
+    if isinstance(x, np.ndarray):
+        return x
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
 
-    raise ValueError("Only .npz sample input is supported in this script.")
+
+def build_sample_from_loader(
+    cityscapes_root: str,
+    split: str,
+    image_width: int,
+    image_height: int,
+    batch_size: int,
+    num_workers: int,
+    input_names: List[str],
+):
+    loader = build_eval_loader(
+        cityscapes_root=cityscapes_root,
+        split=split,
+        image_width=image_width,
+        image_height=image_height,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
+
+    batch = next(iter(loader))
+
+    # Common cases:
+    # 1) batch is tensor
+    # 2) batch is tuple/list and first element is image tensor
+    # 3) batch is dict with image-like key
+    if torch.is_tensor(batch):
+        image = batch
+    elif isinstance(batch, (tuple, list)):
+        image = batch[0]
+    elif isinstance(batch, dict):
+        candidate_keys = ["image", "images", "input", "inputs", "pixel_values"]
+        image = None
+        for k in candidate_keys:
+            if k in batch:
+                image = batch[k]
+                break
+        if image is None:
+            first_key = next(iter(batch.keys()))
+            image = batch[first_key]
+    else:
+        raise TypeError(f"Unsupported batch type from loader: {type(batch)}")
+
+    image = _to_numpy(image)
+
+    if len(input_names) != 1:
+        raise ValueError(
+            f"Expected 1 ONNX input, but got {len(input_names)} inputs: {input_names}"
+        )
+
+    return {input_names[0]: image}
 
 
 def flatten_float(arr: np.ndarray) -> np.ndarray:
@@ -274,9 +324,17 @@ def compare_all_tensors(
 
 def main():
     parser = argparse.ArgumentParser()
+
+    parser.add_argument("--cityscapes_root", type=str, required=True)
     parser.add_argument("--original_model", type=str, required=True)
     parser.add_argument("--optimized_model", type=str, required=True)
-    parser.add_argument("--sample_npz", type=str, required=True)
+
+    parser.add_argument("--image_height", type=int, default=512)
+    parser.add_argument("--image_width", type=int, default=1024)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--split", type=str, default="val", choices=["test", "val"])
+
     parser.add_argument(
         "--provider",
         type=str,
@@ -286,6 +344,7 @@ def main():
     parser.add_argument("--output_json", type=str, default="onnx_compare_report.json")
     parser.add_argument("--pcc_threshold", type=float, default=0.99)
     parser.add_argument("--cosine_threshold", type=float, default=0.99)
+
     args = parser.parse_args()
 
     ref_sess = make_session_from_model_path(
@@ -293,7 +352,16 @@ def main():
         provider=args.provider,
         enable_all_optimizations=False,
     )
-    sample = load_sample(args.sample_npz, list_input_names(ref_sess))
+
+    sample = build_sample_from_loader(
+        cityscapes_root=args.cityscapes_root,
+        split=args.split,
+        image_width=args.image_width,
+        image_height=args.image_height,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        input_names=list_input_names(ref_sess),
+    )
 
     final_output_report = compare_model_outputs(
         original_model_path=args.original_model,
