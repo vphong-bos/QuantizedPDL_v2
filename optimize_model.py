@@ -4,7 +4,8 @@ import copy
 import json
 import os
 import shutil
-from typing import Dict, List, Optional
+from collections import Counter
+from typing import Dict, List
 
 import numpy as np
 import onnx
@@ -121,6 +122,126 @@ def save_ort_optimized_model(
 
 
 # -----------------------------
+# Model graph helpers
+# -----------------------------
+def fix_model_input_shape(
+    model: onnx.ModelProto,
+    fixed_batch: int,
+    image_height: int,
+    image_width: int,
+) -> onnx.ModelProto:
+    model = copy.deepcopy(model)
+
+    if len(model.graph.input) != 1:
+        print("[WARN] fix_input_shape supports only single-input models. Skipping.")
+        return model
+
+    input_value = model.graph.input[0]
+    tensor_type = input_value.type.tensor_type
+    dims = tensor_type.shape.dim
+
+    if len(dims) != 4:
+        print("[WARN] fix_input_shape expects 4D input [N,C,H,W]. Skipping.")
+        return model
+
+    dims[0].dim_value = fixed_batch
+    dims[0].dim_param = ""
+
+    if not dims[1].HasField("dim_value"):
+        dims[1].dim_param = ""
+
+    dims[2].dim_value = image_height
+    dims[2].dim_param = ""
+    dims[3].dim_value = image_width
+    dims[3].dim_param = ""
+
+    return model
+
+
+def maybe_prepare_model_for_rewrite(
+    input_model_path: str,
+    fix_input_shape_flag: bool,
+    fixed_batch: int,
+    image_height: int,
+    image_width: int,
+) -> onnx.ModelProto:
+    model = onnx.load(input_model_path)
+    if fix_input_shape_flag:
+        model = fix_model_input_shape(
+            model=model,
+            fixed_batch=fixed_batch,
+            image_height=image_height,
+            image_width=image_width,
+        )
+    return model
+
+
+def save_model(model: onnx.ModelProto, output_path: str):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    onnx.save(model, output_path)
+
+
+def get_onnxoptimizer_passes(preset: str) -> List[str]:
+    if preset == "conservative":
+        return [
+            "extract_constant_to_initializer",
+            "eliminate_deadend",
+            "eliminate_identity",
+            "eliminate_nop_cast",
+            "eliminate_nop_dropout",
+            "eliminate_nop_pad",
+            "eliminate_nop_transpose",
+        ]
+    if preset == "transpose":
+        return [
+            "eliminate_nop_transpose",
+            "fuse_consecutive_transposes",
+            "fuse_transpose_into_gemm",
+        ]
+    if preset == "extended":
+        return [
+            "extract_constant_to_initializer",
+            "eliminate_deadend",
+            "eliminate_identity",
+            "eliminate_nop_cast",
+            "eliminate_nop_dropout",
+            "eliminate_nop_pad",
+            "eliminate_nop_transpose",
+            "fuse_consecutive_transposes",
+            "fuse_transpose_into_gemm",
+        ]
+    if preset == "basic":
+        return [
+            "extract_constant_to_initializer",
+            "eliminate_deadend",
+            "eliminate_identity",
+            "eliminate_nop_cast",
+            "eliminate_nop_dropout",
+            "eliminate_nop_pad",
+            "eliminate_nop_transpose",
+            "fuse_consecutive_transposes",
+            "fuse_transpose_into_gemm",
+        ]
+    raise ValueError(f"Unknown onnxoptimizer preset: {preset}")
+
+
+def collect_model_stats(model_path: str) -> Dict:
+    model = onnx.load(model_path)
+    op_counts = Counter(node.op_type for node in model.graph.node)
+
+    return {
+        "num_nodes": len(model.graph.node),
+        "num_initializers": len(model.graph.initializer),
+        "model_size_bytes": os.path.getsize(model_path),
+        "op_counts": dict(sorted(op_counts.items())),
+        "num_quantizelinear": op_counts.get("QuantizeLinear", 0),
+        "num_dequantizelinear": op_counts.get("DequantizeLinear", 0),
+        "num_qlinearconv": op_counts.get("QLinearConv", 0),
+        "num_qlinearmatmul": op_counts.get("QLinearMatMul", 0),
+    }
+
+
+# -----------------------------
 # Sample building
 # -----------------------------
 def _to_numpy(x):
@@ -148,9 +269,7 @@ def _find_first_numeric_tensor(obj):
         return obj if _is_numeric_tensor_or_array(obj) else None
 
     if isinstance(obj, dict):
-        preferred_keys = [
-            "image", "images", "input", "inputs", "pixel_values", "img"
-        ]
+        preferred_keys = ["image", "images", "input", "inputs", "pixel_values", "img"]
         for key in preferred_keys:
             if key in obj:
                 found = _find_first_numeric_tensor(obj[key])
@@ -461,7 +580,32 @@ def export_baseline_copy(input_path: str, output_path: str):
     shutil.copyfile(input_path, output_path)
 
 
-def export_onnxoptimizer_basic(input_path: str, output_path: str):
+def export_fixed_shape_copy(
+    input_path: str,
+    output_path: str,
+    fixed_batch: int,
+    image_height: int,
+    image_width: int,
+):
+    model = maybe_prepare_model_for_rewrite(
+        input_model_path=input_path,
+        fix_input_shape_flag=True,
+        fixed_batch=fixed_batch,
+        image_height=image_height,
+        image_width=image_width,
+    )
+    save_model(model, output_path)
+
+
+def export_onnxoptimizer_with_preset(
+    input_path: str,
+    output_path: str,
+    preset: str,
+    fix_input_shape_flag: bool,
+    fixed_batch: int,
+    image_height: int,
+    image_width: int,
+):
     try:
         import onnxoptimizer
     except ImportError as e:
@@ -469,26 +613,29 @@ def export_onnxoptimizer_basic(input_path: str, output_path: str):
             "onnxoptimizer is not installed. Install it with: pip install onnxoptimizer"
         ) from e
 
-    model = onnx.load(input_path)
+    model = maybe_prepare_model_for_rewrite(
+        input_model_path=input_path,
+        fix_input_shape_flag=fix_input_shape_flag,
+        fixed_batch=fixed_batch,
+        image_height=image_height,
+        image_width=image_width,
+    )
 
-    passes = [
-        "extract_constant_to_initializer",
-        "eliminate_deadend",
-        "eliminate_identity",
-        "eliminate_nop_cast",
-        "eliminate_nop_dropout",
-        "eliminate_nop_pad",
-        "eliminate_nop_transpose",
-        "fuse_consecutive_transposes",
-        "fuse_transpose_into_gemm",
-    ]
-
+    passes = get_onnxoptimizer_passes(preset)
     optimized = onnxoptimizer.optimize(model, passes)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    onnx.save(optimized, output_path)
+    save_model(optimized, output_path)
 
 
-def export_onnxsim(input_path: str, output_path: str):
+def export_onnxsim(
+    input_path: str,
+    output_path: str,
+    fix_input_shape_flag: bool,
+    fixed_batch: int,
+    image_height: int,
+    image_width: int,
+    skip_constant_folding: bool,
+    skip_shape_inference: bool,
+):
     try:
         from onnxsim import simplify
     except ImportError as e:
@@ -496,81 +643,195 @@ def export_onnxsim(input_path: str, output_path: str):
             "onnxsim is not installed. Install it with: pip install onnxsim"
         ) from e
 
-    model = onnx.load(input_path)
-    simplified, ok = simplify(model)
+    model = maybe_prepare_model_for_rewrite(
+        input_model_path=input_path,
+        fix_input_shape_flag=fix_input_shape_flag,
+        fixed_batch=fixed_batch,
+        image_height=image_height,
+        image_width=image_width,
+    )
+
+    input_name = model.graph.input[0].name if len(model.graph.input) == 1 else None
+    overwrite_input_shapes = None
+    if fix_input_shape_flag and input_name is not None:
+        overwrite_input_shapes = {
+            input_name: [fixed_batch, 3, image_height, image_width]
+        }
+
+    simplified, ok = simplify(
+        model,
+        overwrite_input_shapes=overwrite_input_shapes,
+        skip_constant_folding=skip_constant_folding,
+        skip_shape_inference=skip_shape_inference,
+    )
     if not ok:
         raise RuntimeError("onnxsim.simplify() returned ok=False")
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    onnx.save(simplified, output_path)
+    save_model(simplified, output_path)
 
 
 def create_optimized_variants(
     input_model_path: str,
     output_dir: str,
     provider: str,
+    variants: List[str],
+    fix_input_shape_flag: bool,
+    fixed_batch: int,
+    image_height: int,
+    image_width: int,
+    onnxoptimizer_preset: str,
+    onnxsim_skip_constant_folding: bool,
+    onnxsim_skip_shape_inference: bool,
 ) -> Dict[str, str]:
     os.makedirs(output_dir, exist_ok=True)
-    variants = {}
+    generated = {}
 
-    baseline_path = os.path.join(output_dir, "baseline_copy.onnx")
-    export_baseline_copy(input_model_path, baseline_path)
-    variants["baseline_copy"] = baseline_path
+    for variant in variants:
+        out_path = os.path.join(output_dir, f"{variant}.onnx")
 
-    for level in ["basic", "extended", "all"]:
-        out_path = os.path.join(output_dir, f"ort_{level}.onnx")
         try:
-            save_ort_optimized_model(
-                input_model_path=input_model_path,
-                output_model_path=out_path,
-                provider=provider,
-                opt_level_name=level,
-            )
-            variants[f"ort_{level}"] = out_path
+            if variant == "baseline_copy":
+                export_baseline_copy(input_model_path, out_path)
+
+            elif variant == "fixed_shape_copy":
+                export_fixed_shape_copy(
+                    input_path=input_model_path,
+                    output_path=out_path,
+                    fixed_batch=fixed_batch,
+                    image_height=image_height,
+                    image_width=image_width,
+                )
+
+            elif variant == "ort_basic":
+                input_for_ort = input_model_path
+                if fix_input_shape_flag:
+                    fixed_tmp = os.path.join(output_dir, "_tmp_fixed_for_ort_basic.onnx")
+                    export_fixed_shape_copy(
+                        input_path=input_model_path,
+                        output_path=fixed_tmp,
+                        fixed_batch=fixed_batch,
+                        image_height=image_height,
+                        image_width=image_width,
+                    )
+                    input_for_ort = fixed_tmp
+
+                save_ort_optimized_model(
+                    input_model_path=input_for_ort,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="basic",
+                )
+
+            elif variant == "ort_extended":
+                input_for_ort = input_model_path
+                if fix_input_shape_flag:
+                    fixed_tmp = os.path.join(output_dir, "_tmp_fixed_for_ort_extended.onnx")
+                    export_fixed_shape_copy(
+                        input_path=input_model_path,
+                        output_path=fixed_tmp,
+                        fixed_batch=fixed_batch,
+                        image_height=image_height,
+                        image_width=image_width,
+                    )
+                    input_for_ort = fixed_tmp
+
+                save_ort_optimized_model(
+                    input_model_path=input_for_ort,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="extended",
+                )
+
+            elif variant == "ort_all":
+                input_for_ort = input_model_path
+                if fix_input_shape_flag:
+                    fixed_tmp = os.path.join(output_dir, "_tmp_fixed_for_ort_all.onnx")
+                    export_fixed_shape_copy(
+                        input_path=input_model_path,
+                        output_path=fixed_tmp,
+                        fixed_batch=fixed_batch,
+                        image_height=image_height,
+                        image_width=image_width,
+                    )
+                    input_for_ort = fixed_tmp
+
+                save_ort_optimized_model(
+                    input_model_path=input_for_ort,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="all",
+                )
+
+            elif variant == "onnxoptimizer_basic":
+                export_onnxoptimizer_with_preset(
+                    input_path=input_model_path,
+                    output_path=out_path,
+                    preset=onnxoptimizer_preset,
+                    fix_input_shape_flag=fix_input_shape_flag,
+                    fixed_batch=fixed_batch,
+                    image_height=image_height,
+                    image_width=image_width,
+                )
+
+            elif variant == "onnxsim":
+                export_onnxsim(
+                    input_path=input_model_path,
+                    output_path=out_path,
+                    fix_input_shape_flag=fix_input_shape_flag,
+                    fixed_batch=fixed_batch,
+                    image_height=image_height,
+                    image_width=image_width,
+                    skip_constant_folding=onnxsim_skip_constant_folding,
+                    skip_shape_inference=onnxsim_skip_shape_inference,
+                )
+
+            elif variant == "onnxoptimizer_plus_ort_all":
+                tmp_path = os.path.join(output_dir, "_tmp_onnxoptimizer_for_ort_all.onnx")
+                export_onnxoptimizer_with_preset(
+                    input_path=input_model_path,
+                    output_path=tmp_path,
+                    preset=onnxoptimizer_preset,
+                    fix_input_shape_flag=fix_input_shape_flag,
+                    fixed_batch=fixed_batch,
+                    image_height=image_height,
+                    image_width=image_width,
+                )
+                save_ort_optimized_model(
+                    input_model_path=tmp_path,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="all",
+                )
+
+            elif variant == "onnxsim_plus_ort_all":
+                tmp_path = os.path.join(output_dir, "_tmp_onnxsim_for_ort_all.onnx")
+                export_onnxsim(
+                    input_path=input_model_path,
+                    output_path=tmp_path,
+                    fix_input_shape_flag=fix_input_shape_flag,
+                    fixed_batch=fixed_batch,
+                    image_height=image_height,
+                    image_width=image_width,
+                    skip_constant_folding=onnxsim_skip_constant_folding,
+                    skip_shape_inference=onnxsim_skip_shape_inference,
+                )
+                save_ort_optimized_model(
+                    input_model_path=tmp_path,
+                    output_model_path=out_path,
+                    provider=provider,
+                    opt_level_name="all",
+                )
+
+            else:
+                raise ValueError(f"Unknown variant: {variant}")
+
+            generated[variant] = out_path
+            print(f"[INFO] Created variant: {variant} -> {out_path}")
+
         except Exception as e:
-            print(f"[WARN] Failed to create ort_{level}: {e}")
+            print(f"[WARN] Failed to create {variant}: {e}")
 
-    onnxopt_path = os.path.join(output_dir, "onnxoptimizer_basic.onnx")
-    try:
-        export_onnxoptimizer_basic(input_model_path, onnxopt_path)
-        variants["onnxoptimizer_basic"] = onnxopt_path
-    except Exception as e:
-        print(f"[WARN] Failed to create onnxoptimizer_basic: {e}")
-
-    onnxsim_path = os.path.join(output_dir, "onnxsim.onnx")
-    try:
-        export_onnxsim(input_model_path, onnxsim_path)
-        variants["onnxsim"] = onnxsim_path
-    except Exception as e:
-        print(f"[WARN] Failed to create onnxsim: {e}")
-
-    if "onnxoptimizer_basic" in variants:
-        combo_path = os.path.join(output_dir, "onnxoptimizer_plus_ort_all.onnx")
-        try:
-            save_ort_optimized_model(
-                input_model_path=variants["onnxoptimizer_basic"],
-                output_model_path=combo_path,
-                provider=provider,
-                opt_level_name="all",
-            )
-            variants["onnxoptimizer_plus_ort_all"] = combo_path
-        except Exception as e:
-            print(f"[WARN] Failed to create onnxoptimizer_plus_ort_all: {e}")
-
-    if "onnxsim" in variants:
-        combo_path = os.path.join(output_dir, "onnxsim_plus_ort_all.onnx")
-        try:
-            save_ort_optimized_model(
-                input_model_path=variants["onnxsim"],
-                output_model_path=combo_path,
-                provider=provider,
-                opt_level_name="all",
-            )
-            variants["onnxsim_plus_ort_all"] = combo_path
-        except Exception as e:
-            print(f"[WARN] Failed to create onnxsim_plus_ort_all: {e}")
-
-    return variants
+    return generated
 
 
 # -----------------------------
@@ -594,7 +855,6 @@ def build_ort_model_obj(
         raise ValueError(f"Expected exactly 1 input, got: {input_names}")
 
     return {
-        # If your evaluate_model() expects "ort" instead of "onnx", change this line.
         "backend": "onnx",
         "model": None,
         "session": sess,
@@ -613,8 +873,12 @@ def parse_args():
     parser.add_argument("--cityscapes_root", type=str, required=True)
     parser.add_argument("--qdq_model", type=str, required=True)
 
-    parser.add_argument("--model_category", type=str, default="PANOPTIC_DEEPLAB",
-                        choices=["DEEPLAB_V3_PLUS", "PANOPTIC_DEEPLAB"])
+    parser.add_argument(
+        "--model_category",
+        type=str,
+        default="PANOPTIC_DEEPLAB",
+        choices=["DEEPLAB_V3_PLUS", "PANOPTIC_DEEPLAB"],
+    )
 
     parser.add_argument("--image_height", type=int, default=512)
     parser.add_argument("--image_width", type=int, default=1024)
@@ -623,8 +887,12 @@ def parse_args():
     parser.add_argument("--max_samples", type=int, default=-1)
     parser.add_argument("--split", type=str, default="val", choices=["test", "val"])
 
-    parser.add_argument("--provider", type=str, default="CPUExecutionProvider",
-                        choices=["CPUExecutionProvider", "CUDAExecutionProvider"])
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default="CPUExecutionProvider",
+        choices=["CPUExecutionProvider", "CUDAExecutionProvider"],
+    )
 
     parser.add_argument("--pcc_threshold", type=float, default=0.99)
     parser.add_argument("--cosine_threshold", type=float, default=0.99)
@@ -632,6 +900,45 @@ def parse_args():
 
     parser.add_argument("--output_dir", type=str, default="onnx_optimization_eval")
     parser.add_argument("--report_json", type=str, default="optimization_report.json")
+
+    parser.add_argument(
+        "--variants",
+        nargs="+",
+        default=[
+            "baseline_copy",
+            "ort_basic",
+            "ort_extended",
+            "ort_all",
+            "onnxoptimizer_basic",
+            "onnxsim",
+            "onnxoptimizer_plus_ort_all",
+            "onnxsim_plus_ort_all",
+        ],
+        choices=[
+            "baseline_copy",
+            "fixed_shape_copy",
+            "ort_basic",
+            "ort_extended",
+            "ort_all",
+            "onnxoptimizer_basic",
+            "onnxsim",
+            "onnxoptimizer_plus_ort_all",
+            "onnxsim_plus_ort_all",
+        ],
+    )
+
+    parser.add_argument("--fix_input_shape", action="store_true")
+    parser.add_argument("--fixed_batch", type=int, default=1)
+
+    parser.add_argument(
+        "--onnxoptimizer_preset",
+        type=str,
+        default="basic",
+        choices=["basic", "conservative", "transpose", "extended"],
+    )
+
+    parser.add_argument("--onnxsim_skip_constant_folding", action="store_true")
+    parser.add_argument("--onnxsim_skip_shape_inference", action="store_true")
 
     return parser.parse_args()
 
@@ -648,10 +955,21 @@ def main():
         input_model_path=args.qdq_model,
         output_dir=variants_dir,
         provider=args.provider,
+        variants=args.variants,
+        fix_input_shape_flag=args.fix_input_shape,
+        fixed_batch=args.fixed_batch,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        onnxoptimizer_preset=args.onnxoptimizer_preset,
+        onnxsim_skip_constant_folding=args.onnxsim_skip_constant_folding,
+        onnxsim_skip_shape_inference=args.onnxsim_skip_shape_inference,
     )
 
     if not variants:
         raise RuntimeError("No optimized variants were created.")
+
+    print("[INFO] Collecting original model stats...")
+    original_stats = collect_model_stats(args.qdq_model)
 
     print("[INFO] Building loader...")
     loader = build_eval_loader(
@@ -681,9 +999,6 @@ def main():
         debug_batch=args.debug_batch,
     )
 
-    baseline_eval = None
-    results = {}
-
     print("[INFO] Evaluating original QDQ model...")
     baseline_obj = build_ort_model_obj(
         model_path=args.qdq_model,
@@ -698,10 +1013,13 @@ def main():
         max_samples=args.max_samples,
     )
 
+    results = {}
+
     for name, model_path in variants.items():
         print(f"\n[INFO] ===== Variant: {name} =====")
         item = {
             "model_path": model_path,
+            "model_stats": None,
             "eval": None,
             "final_outputs": None,
             "first_bad_tensor": None,
@@ -712,6 +1030,8 @@ def main():
         }
 
         try:
+            item["model_stats"] = collect_model_stats(model_path)
+
             model_obj = build_ort_model_obj(
                 model_path=model_path,
                 provider=args.provider,
@@ -751,6 +1071,9 @@ def main():
             print("[INFO] Eval result:")
             print(json.dumps(eval_result, indent=2))
 
+            print("[INFO] Model stats:")
+            print(json.dumps(item["model_stats"], indent=2))
+
             print("[INFO] Final output summary:")
             for out_name, metrics in final_output_report.items():
                 print(
@@ -783,8 +1106,23 @@ def main():
 
     report = {
         "input_qdq_model": args.qdq_model,
+        "input_qdq_model_stats": original_stats,
         "baseline_eval": baseline_eval,
-        "variants": results,
+        "config": {
+            "variants": args.variants,
+            "fix_input_shape": args.fix_input_shape,
+            "fixed_batch": args.fixed_batch,
+            "onnxoptimizer_preset": args.onnxoptimizer_preset,
+            "onnxsim_skip_constant_folding": args.onnxsim_skip_constant_folding,
+            "onnxsim_skip_shape_inference": args.onnxsim_skip_shape_inference,
+            "image_height": args.image_height,
+            "image_width": args.image_width,
+            "batch_size": args.batch_size,
+            "split": args.split,
+            "pcc_threshold": args.pcc_threshold,
+            "cosine_threshold": args.cosine_threshold,
+        },
+        "variants_result": results,
     }
 
     with open(report_path, "w") as f:
