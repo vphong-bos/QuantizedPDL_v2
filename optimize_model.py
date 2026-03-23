@@ -20,7 +20,7 @@ EPS = 1e-12
 
 
 # -----------------------------
-# ORT helpers
+# JSON helpers
 # -----------------------------
 def to_jsonable(obj):
     if isinstance(obj, dict):
@@ -41,6 +41,10 @@ def to_jsonable(obj):
 
     return obj
 
+
+# -----------------------------
+# ORT helpers
+# -----------------------------
 def ort_opt_level_from_name(name: str):
     name = name.lower()
     if name == "disable":
@@ -503,6 +507,7 @@ def collect_real_tensor_names(model: onnx.ModelProto) -> List[str]:
             ordered.append(n)
     return ordered
 
+
 def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelProto:
     model = copy.deepcopy(model)
 
@@ -529,7 +534,6 @@ def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelP
             skipped.append(name)
             continue
 
-        # Only add tensors with known tensor type
         if not vi.type.HasField("tensor_type"):
             skipped.append(name)
             continue
@@ -545,6 +549,7 @@ def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelP
         print(f"[WARN] Skipped {len(skipped)} intermediate tensors with unknown type info.")
 
     return model
+
 
 def run_all_outputs(
     model_path: str,
@@ -573,8 +578,16 @@ def compare_all_tensors(
     pcc_threshold: float = 0.99,
     cosine_threshold: float = 0.99,
 ):
-    orig_vals = run_all_outputs(original_model_path, sample, provider)
-    opt_vals = run_all_outputs(optimized_model_path, sample, provider)
+    try:
+        orig_vals = run_all_outputs(original_model_path, sample, provider)
+        opt_vals = run_all_outputs(optimized_model_path, sample, provider)
+    except Exception as e:
+        return {
+            "first_bad_tensor": None,
+            "worst_50_tensors": [],
+            "total_compared_tensors": 0,
+            "debug_error": str(e),
+        }
 
     common_names = [n for n in orig_vals if n in opt_vals]
     rows = []
@@ -601,7 +614,22 @@ def compare_all_tensors(
         "first_bad_tensor": first_bad,
         "worst_50_tensors": rows[:50],
         "total_compared_tensors": len(rows),
+        "debug_error": None,
     }
+
+
+def is_good_final_output(report: Dict[str, Dict[str, float]], pcc_threshold: float, cosine_threshold: float) -> bool:
+    if not report:
+        return False
+
+    for _, metrics in report.items():
+        if metrics["shape_match"] < 1.0:
+            return False
+        if metrics["pcc"] < pcc_threshold:
+            return False
+        if metrics["cosine"] < cosine_threshold:
+            return False
+    return True
 
 
 # -----------------------------
@@ -722,59 +750,7 @@ def create_optimized_variants(
         out_path = os.path.join(output_dir, f"{variant}.onnx")
 
         try:
-            if variant == "baseline_copy":
-                export_baseline_copy(input_model_path, out_path)
-
-            elif variant == "fixed_shape_copy":
-                export_fixed_shape_copy(
-                    input_path=input_model_path,
-                    output_path=out_path,
-                    fixed_batch=fixed_batch,
-                    image_height=image_height,
-                    image_width=image_width,
-                )
-
-            elif variant == "ort_basic":
-                input_for_ort = input_model_path
-                if fix_input_shape_flag:
-                    fixed_tmp = os.path.join(output_dir, "_tmp_fixed_for_ort_basic.onnx")
-                    export_fixed_shape_copy(
-                        input_path=input_model_path,
-                        output_path=fixed_tmp,
-                        fixed_batch=fixed_batch,
-                        image_height=image_height,
-                        image_width=image_width,
-                    )
-                    input_for_ort = fixed_tmp
-
-                save_ort_optimized_model(
-                    input_model_path=input_for_ort,
-                    output_model_path=out_path,
-                    provider=provider,
-                    opt_level_name="basic",
-                )
-
-            elif variant == "ort_extended":
-                input_for_ort = input_model_path
-                if fix_input_shape_flag:
-                    fixed_tmp = os.path.join(output_dir, "_tmp_fixed_for_ort_extended.onnx")
-                    export_fixed_shape_copy(
-                        input_path=input_model_path,
-                        output_path=fixed_tmp,
-                        fixed_batch=fixed_batch,
-                        image_height=image_height,
-                        image_width=image_width,
-                    )
-                    input_for_ort = fixed_tmp
-
-                save_ort_optimized_model(
-                    input_model_path=input_for_ort,
-                    output_model_path=out_path,
-                    provider=provider,
-                    opt_level_name="extended",
-                )
-
-            elif variant == "ort_all":
+            if variant == "ort_all":
                 input_for_ort = input_model_path
                 if fix_input_shape_flag:
                     fixed_tmp = os.path.join(output_dir, "_tmp_fixed_for_ort_all.onnx")
@@ -792,29 +768,6 @@ def create_optimized_variants(
                     output_model_path=out_path,
                     provider=provider,
                     opt_level_name="all",
-                )
-
-            elif variant == "onnxoptimizer_basic":
-                export_onnxoptimizer_with_preset(
-                    input_path=input_model_path,
-                    output_path=out_path,
-                    preset=onnxoptimizer_preset,
-                    fix_input_shape_flag=fix_input_shape_flag,
-                    fixed_batch=fixed_batch,
-                    image_height=image_height,
-                    image_width=image_width,
-                )
-
-            elif variant == "onnxsim":
-                export_onnxsim(
-                    input_path=input_model_path,
-                    output_path=out_path,
-                    fix_input_shape_flag=fix_input_shape_flag,
-                    fixed_batch=fixed_batch,
-                    image_height=image_height,
-                    image_width=image_width,
-                    skip_constant_folding=onnxsim_skip_constant_folding,
-                    skip_shape_inference=onnxsim_skip_shape_inference,
                 )
 
             elif variant == "onnxoptimizer_plus_ort_all":
@@ -1033,6 +986,7 @@ def main():
         device="cpu",
         max_samples=args.max_samples,
     )
+    baseline_eval = to_jsonable(baseline_eval)
 
     results = {}
 
@@ -1046,6 +1000,8 @@ def main():
             "first_bad_tensor": None,
             "worst_50_tensors": None,
             "total_compared_tensors": None,
+            "debug_error": None,
+            "is_numerically_good": None,
             "status": "ok",
             "error": None,
         }
@@ -1066,6 +1022,7 @@ def main():
                 device="cpu",
                 max_samples=args.max_samples,
             )
+            eval_result = to_jsonable(eval_result)
             item["eval"] = eval_result
 
             final_output_report = compare_model_outputs(
@@ -1088,9 +1045,15 @@ def main():
             item["first_bad_tensor"] = tensor_report["first_bad_tensor"]
             item["worst_50_tensors"] = tensor_report["worst_50_tensors"]
             item["total_compared_tensors"] = tensor_report["total_compared_tensors"]
+            item["debug_error"] = tensor_report.get("debug_error")
+            item["is_numerically_good"] = is_good_final_output(
+                final_output_report,
+                pcc_threshold=args.pcc_threshold,
+                cosine_threshold=args.cosine_threshold,
+            )
 
             print("[INFO] Eval result:")
-            print(json.dumps(to_jsonable(eval_result), indent=2))
+            print(json.dumps(eval_result, indent=2))
 
             print("[INFO] Model stats:")
             print(json.dumps(to_jsonable(item["model_stats"]), indent=2))
@@ -1117,6 +1080,12 @@ def main():
                     f"max_abs={bad['max_abs']:.6e}, "
                     f"mean_abs={bad['mean_abs']:.6e}"
                 )
+
+            if item["debug_error"] is not None:
+                print(f"[WARN] Intermediate tensor debug error: {item['debug_error']}")
+
+            if not item["is_numerically_good"]:
+                print(f"[WARN] Variant {name} is numerically bad. Ignore its speed result.")
 
         except Exception as e:
             item["status"] = "failed"
