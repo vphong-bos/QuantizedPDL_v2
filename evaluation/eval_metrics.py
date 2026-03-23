@@ -41,11 +41,24 @@ def normalize_logits_output(output):
     return output
 
 def get_semantic_logits(model_obj, image, model_category_const):
-    if model_obj["backend"] == "torch":
-        output = model_obj["model"](image)
-        return normalize_logits_output(output)
+    backend = model_obj["backend"]
+    use_cuda = str(image.device).startswith("cuda")
 
-    elif model_obj["backend"] == "onnx":
+    if backend == "torch":
+        if use_cuda:
+            torch.cuda.synchronize()
+
+        start_time = time.perf_counter()
+        output = model_obj["model"](image)
+        if use_cuda:
+            torch.cuda.synchronize()
+        end_time = time.perf_counter()
+
+        logits = normalize_logits_output(output)
+        inference_time = end_time - start_time
+        return logits, inference_time
+
+    elif backend == "onnx":
         session = model_obj["session"]
         input_name = model_obj["input_name"]
 
@@ -54,16 +67,19 @@ def get_semantic_logits(model_obj, image, model_category_const):
         else:
             image_np = image.detach().numpy()
 
+        start_time = time.perf_counter()
         outputs = session.run(None, {input_name: image_np})
+        end_time = time.perf_counter()
 
-        logits = torch.from_numpy(outputs[0]).float().to(image.device)
+        logits = torch.from_numpy(outputs[0]).float()
 
         if logits.ndim == 4 and logits.shape[1] != 19 and logits.shape[-1] == 19:
             logits = logits.permute(0, 3, 1, 2).contiguous()
 
-        return logits
+        inference_time = end_time - start_time
+        return logits, inference_time
 
-    raise ValueError(f"Unsupported backend: {model_obj['backend']}")
+    raise ValueError(f"Unsupported backend: {backend}")
 
 def update_confusion_matrix(conf_mat, pred, target, num_classes=19, ignore_index=255):
     if pred.device != target.device:
@@ -97,11 +113,11 @@ def compute_miou_from_confmat(conf_mat):
         "IoU_per_class": (iou * 100.0).cpu().numpy(),
     }
 
-
 def evaluate_model(model_obj, model_category_const, loader, device, max_samples=-1):
     if model_obj["backend"] == "torch":
         model_obj["model"].eval()
 
+    use_cuda = str(device).startswith("cuda")
     conf_mat = torch.zeros((19, 19), dtype=torch.int64, device=device)
 
     processed = 0
@@ -109,22 +125,25 @@ def evaluate_model(model_obj, model_category_const, loader, device, max_samples=
 
     for batch in loader:
         for sample in batch:
-            image = sample["image"].unsqueeze(0).to(device=device, dtype=torch.float32)
+            if model_obj["backend"] == "torch":
+                image = sample["image"].unsqueeze(0).to(device=device, dtype=torch.float32)
+            else:
+                # Keep ONNX input on CPU to avoid useless GPU->CPU copy
+                image = sample["image"].unsqueeze(0).to(dtype=torch.float32)
+
             label = sample["label"].to(device=device)
             orig_h, orig_w = sample["orig_size"]
 
-            # Accurate timing for GPU
-            if device == "cuda":
-                torch.cuda.synchronize(device)
+            if use_cuda and model_obj["backend"] == "torch":
+                torch.cuda.synchronize()
 
-            start_time = time.perf_counter()
-            logits = get_semantic_logits(model_obj, image, model_category_const)
+            logits, inference_time = get_semantic_logits(
+                model_obj, image, model_category_const
+            )
+            total_inference_time += inference_time
 
-            if device == "cuda":
-                torch.cuda.synchronize(device)
-
-            end_time = time.perf_counter()
-            total_inference_time += (end_time - start_time)
+            if use_cuda and model_obj["backend"] == "torch":
+                torch.cuda.synchronize()
 
             logits = F.interpolate(
                 logits,
