@@ -302,7 +302,7 @@ def analyzer_eval_callback(model, callback_args):
     eval_loader, model_category_const, device, max_samples = callback_args
 
     results = evaluate_model(
-        model=model,
+        model_obj=model,
         model_category_const=model_category_const,
         loader=eval_loader,
         device=device,
