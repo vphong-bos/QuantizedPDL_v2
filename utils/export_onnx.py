@@ -42,10 +42,10 @@ def export_optimized_onnx_model(
     so = ort.SessionOptions()
     so.graph_optimization_level = level_map[optimization_level]
     so.optimized_model_filepath = output_path
-    so.add_session_config_entry(
-        "optimization.disable_specified_optimizers",
-        "NchwcTransformer,ConvActivationFusion"
-    )
+    # so.add_session_config_entry(
+    #     "optimization.disable_specified_optimizers",
+    #     "NchwcTransformer,ConvActivationFusion"
+    # )
 
     try:
         _ = ort.InferenceSession(
