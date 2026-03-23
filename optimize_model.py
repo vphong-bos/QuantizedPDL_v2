@@ -423,6 +423,8 @@ def manual_optimize_model(
     output_model_path: str,
     blocked_tensor_names: Optional[Set[str]] = None,
     blocked_node_names: Optional[Set[str]] = None,
+    allow_qdq_substrings: Optional[List[str]] = None,
+    deny_qdq_substrings: Optional[List[str]] = None,
     fix_input_shape_flag: bool = False,
     fixed_batch: int = 1,
     image_height: int = 512,
@@ -443,6 +445,8 @@ def manual_optimize_model(
         model,
         blocked_tensor_names=blocked_tensor_names,
         blocked_node_names=blocked_node_names,
+        allow_substrings=allow_qdq_substrings,
+        deny_substrings=deny_qdq_substrings,
     )
 
     save_model(model, output_model_path)
@@ -838,10 +842,12 @@ def remove_selected_qdq_pairs(
     blocked_tensor_names: Optional[Set[str]] = None,
     blocked_node_names: Optional[Set[str]] = None,
     allow_substrings: Optional[List[str]] = None,
+    deny_substrings: Optional[List[str]] = None,
 ) -> onnx.ModelProto:
     blocked_tensor_names = set(blocked_tensor_names or [])
     blocked_node_names = set(blocked_node_names or [])
     allow_substrings = list(allow_substrings or [])
+    deny_substrings = list(deny_substrings or [])
 
     model = copy.deepcopy(model)
     consumers = build_output_to_consumers(model)
@@ -849,6 +855,9 @@ def remove_selected_qdq_pairs(
     nodes_to_remove = set()
     rewires = []
     removed_pairs = []
+
+    def match_any(text: str, patterns: List[str]) -> bool:
+        return any(p in text for p in patterns)
 
     for q_node in model.graph.node:
         if q_node.op_type != "QuantizeLinear":
@@ -861,11 +870,6 @@ def remove_selected_qdq_pairs(
         q_out = q_node.output[0]
         if q_out in blocked_tensor_names:
             continue
-
-        if allow_substrings:
-            haystack = " ".join([q_node.name, q_out, q_node.input[0]])
-            if not any(s in haystack for s in allow_substrings):
-                continue
 
         q_consumers = consumers.get(q_out, [])
         if len(q_consumers) != 1:
@@ -883,10 +887,19 @@ def remove_selected_qdq_pairs(
         if dq_out in blocked_tensor_names:
             continue
 
-        if allow_substrings:
-            haystack = " ".join([dq_node.name, dq_out])
-            if not any(s in haystack for s in allow_substrings):
-                continue
+        text = " ".join([
+            q_node.name,
+            dq_node.name,
+            q_out,
+            dq_out,
+            q_node.input[0],
+        ])
+
+        if deny_substrings and match_any(text, deny_substrings):
+            continue
+
+        if allow_substrings and not match_any(text, allow_substrings):
+            continue
 
         original_src = q_node.input[0]
 
@@ -1021,6 +1034,8 @@ def create_optimized_variants(
     onnxsim_skip_shape_inference: bool,
     block_tensors: List[str],
     block_nodes: List[str],
+    allow_qdq_substrings,
+    deny_qdq_substrings
 ) -> Dict[str, str]:
     os.makedirs(output_dir, exist_ok=True)
     generated = {}
@@ -1049,6 +1064,8 @@ def create_optimized_variants(
                     output_model_path=out_path,
                     blocked_tensor_names=set(block_tensors),
                     blocked_node_names=set(block_nodes),
+                    allow_qdq_substrings=allow_qdq_substrings,
+                    deny_qdq_substrings=deny_qdq_substrings,
                     fix_input_shape_flag=fix_input_shape_flag,
                     fixed_batch=fixed_batch,
                     image_height=image_height,
@@ -1326,7 +1343,18 @@ def parse_args():
         "--allow_qdq_substrings",
         nargs="*",
         default=[],
-        help="Only remove QDQ pairs if node/output names contain one of these substrings."
+        help="Only remove QDQ pairs if names contain one of these substrings.",
+    )
+    parser.add_argument(
+        "--deny_qdq_substrings",
+        nargs="*",
+        default=[
+            "semantic_head/project_conv",
+            "instance_head/project_conv",
+            "fuse_conv",
+            "res5",
+        ],
+        help="Never remove QDQ pairs if names contain one of these substrings.",
     )
 
     return parser.parse_args()
@@ -1354,6 +1382,8 @@ def main():
         onnxsim_skip_shape_inference=args.onnxsim_skip_shape_inference,
         block_tensors=args.block_tensors,
         block_nodes=args.block_nodes,
+        allow_qdq_substrings=args.allow_qdq_substrings,
+        deny_qdq_substrings=args.deny_qdq_substrings
     )
 
     if not variants:
