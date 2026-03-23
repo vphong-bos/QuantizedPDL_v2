@@ -909,7 +909,7 @@ def parse_args():
             "onnxoptimizer_plus_ort_all",
             "onnxsim_plus_ort_all",
         ],
-        default=[
+        choices=[
             "ort_all",
             "onnxoptimizer_plus_ort_all",
             "onnxsim_plus_ort_all",
