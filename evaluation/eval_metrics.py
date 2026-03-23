@@ -114,8 +114,33 @@ def compute_miou_from_confmat(conf_mat):
     }
 
 def evaluate_model(model_obj, model_category_const, loader, device, max_samples=-1):
-    if model_obj["backend"] == "torch":
-        model_obj["model"].eval()
+    """
+    Supports either:
+      1) dict input:
+         {
+             "backend": "torch",
+             "model": <nn.Module or engine>
+         }
+
+      2) plain model/module input:
+         <nn.Module>, including AimetTraceWrapper
+    """
+
+    # Normalize model_obj so the rest of the function can use backend/model safely
+    if isinstance(model_obj, dict):
+        backend = model_obj.get("backend", "torch")
+        model = model_obj.get("model", model_obj)
+        normalized_model_obj = model_obj
+    else:
+        backend = getattr(model_obj, "backend", "torch")
+        model = model_obj
+        normalized_model_obj = {
+            "backend": backend,
+            "model": model,
+        }
+
+    if backend == "torch":
+        model.eval()
 
     use_cuda = str(device).startswith("cuda")
     conf_mat = torch.zeros((19, 19), dtype=torch.int64, device=device)
@@ -125,24 +150,23 @@ def evaluate_model(model_obj, model_category_const, loader, device, max_samples=
 
     for batch in loader:
         for sample in batch:
-            if model_obj["backend"] == "torch":
+            if backend == "torch":
                 image = sample["image"].unsqueeze(0).to(device=device, dtype=torch.float32)
             else:
-                # Keep ONNX input on CPU to avoid useless GPU->CPU copy
                 image = sample["image"].unsqueeze(0).to(dtype=torch.float32)
 
             label = sample["label"].to(device=device)
             orig_h, orig_w = sample["orig_size"]
 
-            if use_cuda and model_obj["backend"] == "torch":
+            if use_cuda and backend == "torch":
                 torch.cuda.synchronize()
 
             logits, inference_time = get_semantic_logits(
-                model_obj, image, model_category_const
+                normalized_model_obj, image, model_category_const
             )
             total_inference_time += inference_time
 
-            if use_cuda and model_obj["backend"] == "torch":
+            if use_cuda and backend == "torch":
                 torch.cuda.synchronize()
 
             logits = F.interpolate(
@@ -163,10 +187,14 @@ def evaluate_model(model_obj, model_category_const, loader, device, max_samples=
             if max_samples > 0 and processed >= max_samples:
                 metrics = compute_miou_from_confmat(conf_mat)
                 metrics["FPS"] = processed / total_inference_time if total_inference_time > 0 else 0.0
-                metrics["Avg_Inference_Time_ms"] = (total_inference_time / processed) * 1000.0
+                metrics["Avg_Inference_Time_ms"] = (
+                    (total_inference_time / processed) * 1000.0 if processed > 0 else 0.0
+                )
                 return metrics
 
     metrics = compute_miou_from_confmat(conf_mat)
     metrics["FPS"] = processed / total_inference_time if total_inference_time > 0 else 0.0
-    metrics["Avg_Inference_Time_ms"] = (total_inference_time / processed) * 1000.0 if processed > 0 else 0.0
+    metrics["Avg_Inference_Time_ms"] = (
+        (total_inference_time / processed) * 1000.0 if processed > 0 else 0.0
+    )
     return metrics
