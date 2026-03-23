@@ -48,7 +48,13 @@ class EvalDataset(Dataset):
         self.split = split
         self.image_width = image_width
         self.image_height = image_height
-        self.to_tensor = T.ToTensor()
+        self.transform = T.Compose([
+            T.ToTensor(),
+            T.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            )
+        ])
 
         pattern = os.path.join(
             cityscapes_root,
@@ -90,7 +96,7 @@ class EvalDataset(Dataset):
             (self.image_width, self.image_height),
             interpolation=cv2.INTER_LINEAR,
         )
-        image_tensor = self.to_tensor(Image.fromarray(resized)).float()
+        image_tensor = self.transform(Image.fromarray(resized)).float()
 
         label_ids = np.array(Image.open(label_path), dtype=np.uint8)
         train_ids = ID_TO_TRAIN_ID[label_ids]
