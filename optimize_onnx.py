@@ -83,6 +83,80 @@ def _to_numpy(x):
     return np.asarray(x)
 
 
+def _is_numeric_tensor_or_array(x) -> bool:
+    if torch.is_tensor(x):
+        return x.dtype in {
+            torch.float16, torch.float32, torch.float64,
+            torch.int8, torch.int16, torch.int32, torch.int64,
+            torch.uint8, torch.bool,
+        }
+    if isinstance(x, np.ndarray):
+        return x.dtype.kind in ("b", "i", "u", "f")
+    return False
+
+
+def _find_first_numeric_tensor(obj):
+    if torch.is_tensor(obj) or isinstance(obj, np.ndarray):
+        return obj if _is_numeric_tensor_or_array(obj) else None
+
+    if isinstance(obj, dict):
+        preferred_keys = [
+            "image", "images", "input", "inputs", "pixel_values", "img"
+        ]
+        for key in preferred_keys:
+            if key in obj:
+                found = _find_first_numeric_tensor(obj[key])
+                if found is not None:
+                    return found
+
+        for _, value in obj.items():
+            found = _find_first_numeric_tensor(value)
+            if found is not None:
+                return found
+        return None
+
+    if isinstance(obj, (tuple, list)):
+        for item in obj:
+            found = _find_first_numeric_tensor(item)
+            if found is not None:
+                return found
+        return None
+
+    return None
+
+
+def _debug_print_batch(batch, prefix="[DEBUG]"):
+    print(f"{prefix} batch type: {type(batch)}")
+
+    if torch.is_tensor(batch):
+        print(f"{prefix} tensor shape={tuple(batch.shape)} dtype={batch.dtype}")
+        return
+
+    if isinstance(batch, np.ndarray):
+        print(f"{prefix} ndarray shape={batch.shape} dtype={batch.dtype}")
+        return
+
+    if isinstance(batch, dict):
+        for k, v in batch.items():
+            if torch.is_tensor(v):
+                print(f"{prefix} dict[{k}] -> tensor shape={tuple(v.shape)} dtype={v.dtype}")
+            elif isinstance(v, np.ndarray):
+                print(f"{prefix} dict[{k}] -> ndarray shape={v.shape} dtype={v.dtype}")
+            else:
+                print(f"{prefix} dict[{k}] -> type={type(v)}")
+        return
+
+    if isinstance(batch, (tuple, list)):
+        for i, v in enumerate(batch):
+            if torch.is_tensor(v):
+                print(f"{prefix} batch[{i}] -> tensor shape={tuple(v.shape)} dtype={v.dtype}")
+            elif isinstance(v, np.ndarray):
+                print(f"{prefix} batch[{i}] -> ndarray shape={v.shape} dtype={v.dtype}")
+            else:
+                print(f"{prefix} batch[{i}] -> type={type(v)}")
+        return
+
+
 def build_sample_from_loader(
     cityscapes_root: str,
     split: str,
@@ -91,6 +165,7 @@ def build_sample_from_loader(
     batch_size: int,
     num_workers: int,
     input_names: List[str],
+    debug_batch: bool = False,
 ):
     loader = build_eval_loader(
         cityscapes_root=cityscapes_root,
@@ -103,34 +178,35 @@ def build_sample_from_loader(
 
     batch = next(iter(loader))
 
-    # Common cases:
-    # 1) batch is tensor
-    # 2) batch is tuple/list and first element is image tensor
-    # 3) batch is dict with image-like key
-    if torch.is_tensor(batch):
-        image = batch
-    elif isinstance(batch, (tuple, list)):
-        image = batch[0]
-    elif isinstance(batch, dict):
-        candidate_keys = ["image", "images", "input", "inputs", "pixel_values"]
-        image = None
-        for k in candidate_keys:
-            if k in batch:
-                image = batch[k]
-                break
-        if image is None:
-            first_key = next(iter(batch.keys()))
-            image = batch[first_key]
-    else:
-        raise TypeError(f"Unsupported batch type from loader: {type(batch)}")
+    if debug_batch:
+        _debug_print_batch(batch)
+
+    image = _find_first_numeric_tensor(batch)
+    if image is None:
+        raise ValueError(
+            f"Could not find numeric tensor/array in loader batch. "
+            f"Batch type: {type(batch)}"
+        )
 
     image = _to_numpy(image)
+
+    if image.dtype.kind not in ("b", "i", "u", "f"):
+        raise ValueError(
+            f"Selected loader field is not numeric. dtype={image.dtype}, type={type(image)}"
+        )
+
+    if image.dtype != np.float32:
+        image = image.astype(np.float32)
 
     if len(input_names) != 1:
         raise ValueError(
             f"Expected 1 ONNX input, but got {len(input_names)} inputs: {input_names}"
         )
 
+    print(
+        f"[INFO] Using input '{input_names[0]}' "
+        f"with shape={image.shape}, dtype={image.dtype}"
+    )
     return {input_names[0]: image}
 
 
@@ -344,6 +420,7 @@ def main():
     parser.add_argument("--output_json", type=str, default="onnx_compare_report.json")
     parser.add_argument("--pcc_threshold", type=float, default=0.99)
     parser.add_argument("--cosine_threshold", type=float, default=0.99)
+    parser.add_argument("--debug_batch", action="store_true")
 
     args = parser.parse_args()
 
@@ -361,6 +438,7 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         input_names=list_input_names(ref_sess),
+        debug_batch=args.debug_batch,
     )
 
     final_output_report = compare_model_outputs(
