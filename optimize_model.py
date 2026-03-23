@@ -484,7 +484,6 @@ def collect_real_tensor_names(model: onnx.ModelProto) -> List[str]:
             ordered.append(n)
     return ordered
 
-
 def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelProto:
     model = copy.deepcopy(model)
 
@@ -500,19 +499,33 @@ def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelP
     known_value_infos.update({vi.name: vi for vi in model.graph.input})
     known_value_infos.update({vi.name: vi for vi in model.graph.output})
 
+    skipped = []
+
     for name in names:
         if name in existing_output_names:
             continue
 
-        if name in known_value_infos:
-            model.graph.output.append(copy.deepcopy(known_value_infos[name]))
-        else:
-            model.graph.output.append(
-                helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, None)
-            )
+        vi = known_value_infos.get(name)
+        if vi is None:
+            skipped.append(name)
+            continue
+
+        # Only add tensors with known tensor type
+        if not vi.type.HasField("tensor_type"):
+            skipped.append(name)
+            continue
+
+        elem_type = vi.type.tensor_type.elem_type
+        if elem_type == onnx.TensorProto.UNDEFINED:
+            skipped.append(name)
+            continue
+
+        model.graph.output.append(copy.deepcopy(vi))
+
+    if skipped:
+        print(f"[WARN] Skipped {len(skipped)} intermediate tensors with unknown type info.")
 
     return model
-
 
 def run_all_outputs(
     model_path: str,
