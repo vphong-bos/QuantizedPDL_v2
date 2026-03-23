@@ -22,6 +22,25 @@ EPS = 1e-12
 # -----------------------------
 # ORT helpers
 # -----------------------------
+def to_jsonable(obj):
+    if isinstance(obj, dict):
+        return {str(k): to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [to_jsonable(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [to_jsonable(v) for v in obj]
+
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    if isinstance(obj, np.generic):
+        return obj.item()
+
+    if torch.is_tensor(obj):
+        return obj.detach().cpu().tolist()
+
+    return obj
+
 def ort_opt_level_from_name(name: str):
     name = name.lower()
     if name == "disable":
@@ -1128,7 +1147,7 @@ def main():
     }
 
     with open(report_path, "w") as f:
-        json.dump(report, f, indent=2)
+        json.dump(to_jsonable(report), f, indent=2)
 
     print(f"\n[INFO] Wrote report to: {report_path}")
 
