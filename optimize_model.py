@@ -418,80 +418,6 @@ def remove_nop_transposes(model: onnx.ModelProto) -> onnx.ModelProto:
         print(f"[INFO] Removed {removed} no-op Transpose nodes.")
     return model
 
-
-def remove_selected_qdq_pairs(
-    model: onnx.ModelProto,
-    blocked_tensor_names: Optional[Set[str]] = None,
-    blocked_node_names: Optional[Set[str]] = None,
-) -> onnx.ModelProto:
-    blocked_tensor_names = set(blocked_tensor_names or [])
-    blocked_node_names = set(blocked_node_names or [])
-
-    model = copy.deepcopy(model)
-    consumers = build_output_to_consumers(model)
-
-    nodes_to_remove = set()
-    rewires = []
-    removed_pairs = []
-
-    for q_node in model.graph.node:
-        if q_node.op_type != "QuantizeLinear":
-            continue
-        if q_node.name in blocked_node_names:
-            continue
-        if len(q_node.output) != 1 or len(q_node.input) < 1:
-            continue
-
-        q_out = q_node.output[0]
-        if q_out in blocked_tensor_names:
-            continue
-
-        q_consumers = consumers.get(q_out, [])
-        if len(q_consumers) != 1:
-            continue
-
-        dq_node = q_consumers[0]
-        if dq_node.op_type != "DequantizeLinear":
-            continue
-        if dq_node.name in blocked_node_names:
-            continue
-        if len(dq_node.output) != 1:
-            continue
-
-        dq_out = dq_node.output[0]
-        if dq_out in blocked_tensor_names:
-            continue
-
-        original_src = q_node.input[0]
-
-        rewires.append((dq_out, original_src))
-        nodes_to_remove.add(id(q_node))
-        nodes_to_remove.add(id(dq_node))
-        removed_pairs.append({
-            "q_node_name": q_node.name,
-            "dq_node_name": dq_node.name,
-            "q_out": q_out,
-            "dq_out": dq_out,
-            "rewired_to": original_src,
-        })
-
-    for old_name, new_name in rewires:
-        for node in model.graph.node:
-            for i, inp in enumerate(node.input):
-                if inp == old_name:
-                    node.input[i] = new_name
-        for out in model.graph.output:
-            if out.name == old_name:
-                out.name = new_name
-
-    kept_nodes = [n for n in model.graph.node if id(n) not in nodes_to_remove]
-    del model.graph.node[:]
-    model.graph.node.extend(kept_nodes)
-
-    print(f"[INFO] Removed {len(removed_pairs)} selected QDQ pairs.")
-    return model
-
-
 def manual_optimize_model(
     input_model_path: str,
     output_model_path: str,
@@ -907,6 +833,90 @@ def is_good_final_output(report: Dict[str, Dict[str, float]], pcc_threshold: flo
 # -----------------------------
 # Optimization variants
 # -----------------------------
+def remove_selected_qdq_pairs(
+    model: onnx.ModelProto,
+    blocked_tensor_names: Optional[Set[str]] = None,
+    blocked_node_names: Optional[Set[str]] = None,
+    allow_substrings: Optional[List[str]] = None,
+) -> onnx.ModelProto:
+    blocked_tensor_names = set(blocked_tensor_names or [])
+    blocked_node_names = set(blocked_node_names or [])
+    allow_substrings = list(allow_substrings or [])
+
+    model = copy.deepcopy(model)
+    consumers = build_output_to_consumers(model)
+
+    nodes_to_remove = set()
+    rewires = []
+    removed_pairs = []
+
+    for q_node in model.graph.node:
+        if q_node.op_type != "QuantizeLinear":
+            continue
+        if q_node.name in blocked_node_names:
+            continue
+        if len(q_node.output) != 1 or len(q_node.input) < 1:
+            continue
+
+        q_out = q_node.output[0]
+        if q_out in blocked_tensor_names:
+            continue
+
+        if allow_substrings:
+            haystack = " ".join([q_node.name, q_out, q_node.input[0]])
+            if not any(s in haystack for s in allow_substrings):
+                continue
+
+        q_consumers = consumers.get(q_out, [])
+        if len(q_consumers) != 1:
+            continue
+
+        dq_node = q_consumers[0]
+        if dq_node.op_type != "DequantizeLinear":
+            continue
+        if dq_node.name in blocked_node_names:
+            continue
+        if len(dq_node.output) != 1:
+            continue
+
+        dq_out = dq_node.output[0]
+        if dq_out in blocked_tensor_names:
+            continue
+
+        if allow_substrings:
+            haystack = " ".join([dq_node.name, dq_out])
+            if not any(s in haystack for s in allow_substrings):
+                continue
+
+        original_src = q_node.input[0]
+
+        rewires.append((dq_out, original_src))
+        nodes_to_remove.add(id(q_node))
+        nodes_to_remove.add(id(dq_node))
+        removed_pairs.append({
+            "q_node_name": q_node.name,
+            "dq_node_name": dq_node.name,
+            "q_out": q_out,
+            "dq_out": dq_out,
+            "rewired_to": original_src,
+        })
+
+    for old_name, new_name in rewires:
+        for node in model.graph.node:
+            for i, inp in enumerate(node.input):
+                if inp == old_name:
+                    node.input[i] = new_name
+        for out in model.graph.output:
+            if out.name == old_name:
+                out.name = new_name
+
+    kept_nodes = [n for n in model.graph.node if id(n) not in nodes_to_remove]
+    del model.graph.node[:]
+    model.graph.node.extend(kept_nodes)
+
+    print(f"[INFO] Removed {len(removed_pairs)} selected QDQ pairs.")
+    return model
+
 def export_fixed_shape_copy(
     input_path: str,
     output_path: str,
@@ -1310,6 +1320,13 @@ def parse_args():
         nargs="*",
         default=["4662"],
         help="Tensor names to inspect in original and optimized models.",
+    )
+
+    parser.add_argument(
+        "--allow_qdq_substrings",
+        nargs="*",
+        default=[],
+        help="Only remove QDQ pairs if node/output names contain one of these substrings."
     )
 
     return parser.parse_args()
