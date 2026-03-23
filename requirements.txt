@@ -1,4 +1,4 @@
 aimet-torch
 loguru
-onnxruntime
-onnxruntime-gpu==1.24.1
+onnxruntime==1.24.2
+onnxruntime-gpu==1.24.2
