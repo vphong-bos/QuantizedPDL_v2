@@ -316,6 +316,39 @@ def collect_all_value_names(model: onnx.ModelProto) -> List[str]:
     return ordered
 
 
+def collect_real_tensor_names(model: onnx.ModelProto) -> List[str]:
+    """
+    Collect only tensor names that are guaranteed to exist at runtime:
+    - graph inputs
+    - node outputs
+    Exclude initializers and existing graph outputs.
+    """
+    existing_outputs = set(o.name for o in model.graph.output)
+    initializer_names = set(i.name for i in model.graph.initializer)
+    graph_input_names = set(i.name for i in model.graph.input)
+
+    names = []
+
+    # Real graph inputs
+    for name in model.graph.input:
+        if name.name not in existing_outputs and name.name not in initializer_names:
+            names.append(name.name)
+
+    # Real node outputs
+    for node in model.graph.node:
+        for out in node.output:
+            if out and out not in existing_outputs and out not in initializer_names:
+                names.append(out)
+
+    seen = set()
+    ordered = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ordered
+
+
 def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelProto:
     model = copy.deepcopy(model)
 
@@ -324,7 +357,7 @@ def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelP
     except Exception:
         pass
 
-    names = collect_all_value_names(model)
+    names = collect_real_tensor_names(model)
     existing_output_names = set(o.name for o in model.graph.output)
 
     known_value_infos = {vi.name: vi for vi in model.graph.value_info}
@@ -353,16 +386,18 @@ def run_all_outputs(
     model = onnx.load(model_path)
     model_with_all_outputs = add_all_intermediate_outputs_to_model(model)
 
-    sess = make_session_from_onnx_model(
-        model_with_all_outputs,
-        provider=provider,
-        enable_all_optimizations=False,
-    )
+    try:
+        sess = make_session_from_onnx_model(
+            model_with_all_outputs,
+            provider=provider,
+            enable_all_optimizations=False,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Failed to create debug session for {model_path}: {e}")
 
     output_names = list_output_names(sess)
     values = sess.run(output_names, sample)
     return dict(zip(output_names, values))
-
 
 def compare_all_tensors(
     original_model_path: str,
