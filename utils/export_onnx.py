@@ -6,7 +6,7 @@ def export_optimized_onnx_model(
     quant_weights,
     output_path,
     provider="CPUExecutionProvider",
-    optimization_level="basic",   # "basic", "extended", "all"
+    optimization_level="all",   # "basic", "extended", "all"
 ):
     """
     Export an ONNX Runtime optimized model.
