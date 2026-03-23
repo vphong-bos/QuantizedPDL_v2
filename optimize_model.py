@@ -5,13 +5,13 @@ import json
 import os
 import shutil
 from collections import Counter
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 
 import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
-from onnx import helper, shape_inference
+from onnx import shape_inference
 
 from evaluation.eval_dataset import build_eval_loader
 from evaluation.eval_metrics import evaluate_model
@@ -29,16 +29,12 @@ def to_jsonable(obj):
         return [to_jsonable(v) for v in obj]
     if isinstance(obj, tuple):
         return [to_jsonable(v) for v in obj]
-
     if isinstance(obj, np.ndarray):
         return obj.tolist()
-
     if isinstance(obj, np.generic):
         return obj.item()
-
     if torch.is_tensor(obj):
         return obj.detach().cpu().tolist()
-
     return obj
 
 
@@ -145,7 +141,7 @@ def save_ort_optimized_model(
 
 
 # -----------------------------
-# Model graph helpers
+# Model helpers
 # -----------------------------
 def fix_model_input_shape(
     model: onnx.ModelProto,
@@ -262,6 +258,268 @@ def collect_model_stats(model_path: str) -> Dict:
         "num_qlinearconv": op_counts.get("QLinearConv", 0),
         "num_qlinearmatmul": op_counts.get("QLinearMatMul", 0),
     }
+
+
+def get_attribute(node: onnx.NodeProto, name: str):
+    for attr in node.attribute:
+        if attr.name == name:
+            return attr
+    return None
+
+
+def build_output_to_consumers(model: onnx.ModelProto):
+    consumers = {}
+    for node in model.graph.node:
+        for inp in node.input:
+            if inp:
+                consumers.setdefault(inp, []).append(node)
+    return consumers
+
+
+def find_tensor_producer(model: onnx.ModelProto, tensor_name: str):
+    for node in model.graph.node:
+        if tensor_name in node.output:
+            return node
+    return None
+
+
+def find_tensor_consumers(model: onnx.ModelProto, tensor_name: str):
+    consumers = []
+    for node in model.graph.node:
+        if tensor_name in node.input:
+            consumers.append(node)
+    return consumers
+
+
+def node_to_dict(node: Optional[onnx.NodeProto]):
+    if node is None:
+        return None
+    return {
+        "name": node.name,
+        "op_type": node.op_type,
+        "inputs": list(node.input),
+        "outputs": list(node.output),
+    }
+
+
+def inspect_tensor_context(model_path: str, tensor_name: str):
+    model = onnx.load(model_path)
+    producer = find_tensor_producer(model, tensor_name)
+    consumers = find_tensor_consumers(model, tensor_name)
+    return {
+        "tensor_name": tensor_name,
+        "producer": node_to_dict(producer),
+        "consumers": [node_to_dict(n) for n in consumers],
+    }
+
+
+# -----------------------------
+# Manual optimization passes
+# -----------------------------
+def remove_unused_initializers(model: onnx.ModelProto) -> onnx.ModelProto:
+    model = copy.deepcopy(model)
+
+    used_names = set()
+    for node in model.graph.node:
+        for x in node.input:
+            if x:
+                used_names.add(x)
+    for out in model.graph.output:
+        used_names.add(out.name)
+
+    kept = []
+    removed = []
+    for init in model.graph.initializer:
+        if init.name in used_names:
+            kept.append(init)
+        else:
+            removed.append(init.name)
+
+    del model.graph.initializer[:]
+    model.graph.initializer.extend(kept)
+
+    if removed:
+        print(f"[INFO] Removed {len(removed)} unused initializers.")
+    return model
+
+
+def remove_identity_nodes(model: onnx.ModelProto) -> onnx.ModelProto:
+    model = copy.deepcopy(model)
+
+    nodes = []
+    removed = 0
+
+    for node in model.graph.node:
+        if node.op_type != "Identity" or len(node.input) != 1 or len(node.output) != 1:
+            nodes.append(node)
+            continue
+
+        src = node.input[0]
+        dst = node.output[0]
+
+        for other in model.graph.node:
+            for i, name in enumerate(other.input):
+                if name == dst:
+                    other.input[i] = src
+
+        for out in model.graph.output:
+            if out.name == dst:
+                out.name = src
+
+        removed += 1
+
+    del model.graph.node[:]
+    model.graph.node.extend(nodes)
+
+    if removed:
+        print(f"[INFO] Removed {removed} Identity nodes.")
+    return model
+
+
+def remove_nop_transposes(model: onnx.ModelProto) -> onnx.ModelProto:
+    model = copy.deepcopy(model)
+
+    nodes = []
+    removed = 0
+
+    for node in model.graph.node:
+        if node.op_type != "Transpose" or len(node.input) != 1 or len(node.output) != 1:
+            nodes.append(node)
+            continue
+
+        attr = get_attribute(node, "perm")
+        if attr is None:
+            nodes.append(node)
+            continue
+
+        perm = list(attr.ints)
+        if perm != list(range(len(perm))):
+            nodes.append(node)
+            continue
+
+        src = node.input[0]
+        dst = node.output[0]
+
+        for other in model.graph.node:
+            for i, name in enumerate(other.input):
+                if name == dst:
+                    other.input[i] = src
+
+        for out in model.graph.output:
+            if out.name == dst:
+                out.name = src
+
+        removed += 1
+
+    del model.graph.node[:]
+    model.graph.node.extend(nodes)
+
+    if removed:
+        print(f"[INFO] Removed {removed} no-op Transpose nodes.")
+    return model
+
+
+def remove_selected_qdq_pairs(
+    model: onnx.ModelProto,
+    blocked_tensor_names: Optional[Set[str]] = None,
+    blocked_node_names: Optional[Set[str]] = None,
+) -> onnx.ModelProto:
+    blocked_tensor_names = set(blocked_tensor_names or [])
+    blocked_node_names = set(blocked_node_names or [])
+
+    model = copy.deepcopy(model)
+    consumers = build_output_to_consumers(model)
+
+    nodes_to_remove = set()
+    rewires = []
+    removed_pairs = []
+
+    for q_node in model.graph.node:
+        if q_node.op_type != "QuantizeLinear":
+            continue
+        if q_node.name in blocked_node_names:
+            continue
+        if len(q_node.output) != 1 or len(q_node.input) < 1:
+            continue
+
+        q_out = q_node.output[0]
+        if q_out in blocked_tensor_names:
+            continue
+
+        q_consumers = consumers.get(q_out, [])
+        if len(q_consumers) != 1:
+            continue
+
+        dq_node = q_consumers[0]
+        if dq_node.op_type != "DequantizeLinear":
+            continue
+        if dq_node.name in blocked_node_names:
+            continue
+        if len(dq_node.output) != 1:
+            continue
+
+        dq_out = dq_node.output[0]
+        if dq_out in blocked_tensor_names:
+            continue
+
+        original_src = q_node.input[0]
+
+        rewires.append((dq_out, original_src))
+        nodes_to_remove.add(id(q_node))
+        nodes_to_remove.add(id(dq_node))
+        removed_pairs.append({
+            "q_node_name": q_node.name,
+            "dq_node_name": dq_node.name,
+            "q_out": q_out,
+            "dq_out": dq_out,
+            "rewired_to": original_src,
+        })
+
+    for old_name, new_name in rewires:
+        for node in model.graph.node:
+            for i, inp in enumerate(node.input):
+                if inp == old_name:
+                    node.input[i] = new_name
+        for out in model.graph.output:
+            if out.name == old_name:
+                out.name = new_name
+
+    kept_nodes = [n for n in model.graph.node if id(n) not in nodes_to_remove]
+    del model.graph.node[:]
+    model.graph.node.extend(kept_nodes)
+
+    print(f"[INFO] Removed {len(removed_pairs)} selected QDQ pairs.")
+    return model
+
+
+def manual_optimize_model(
+    input_model_path: str,
+    output_model_path: str,
+    blocked_tensor_names: Optional[Set[str]] = None,
+    blocked_node_names: Optional[Set[str]] = None,
+    fix_input_shape_flag: bool = False,
+    fixed_batch: int = 1,
+    image_height: int = 512,
+    image_width: int = 1024,
+):
+    model = maybe_prepare_model_for_rewrite(
+        input_model_path=input_model_path,
+        fix_input_shape_flag=fix_input_shape_flag,
+        fixed_batch=fixed_batch,
+        image_height=image_height,
+        image_width=image_width,
+    )
+
+    model = remove_unused_initializers(model)
+    model = remove_identity_nodes(model)
+    model = remove_nop_transposes(model)
+    model = remove_selected_qdq_pairs(
+        model,
+        blocked_tensor_names=blocked_tensor_names,
+        blocked_node_names=blocked_node_names,
+    )
+
+    save_model(model, output_model_path)
 
 
 # -----------------------------
@@ -435,11 +693,14 @@ def pcc(a: np.ndarray, b: np.ndarray) -> float:
     if std_a < EPS or std_b < EPS:
         return 0.0
 
-    corr = np.corrcoef(a, b)[0, 1]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        corr = np.corrcoef(a, b)[0, 1]
+
     if np.isnan(corr) or np.isinf(corr):
         return 0.0
 
     return float(corr)
+
 
 def compare_arrays(a: np.ndarray, b: np.ndarray) -> Dict[str, float]:
     if a.shape != b.shape:
@@ -557,7 +818,7 @@ def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelP
         model.graph.output.append(copy.deepcopy(vi))
 
     if skipped:
-        print(f"[WARN] Skipped {len(skipped)} intermediate tensors with unknown type info.")
+        print(f"[INFO] Skipped {len(skipped)} intermediate tensors with unknown type info during debug export.")
 
     return model
 
@@ -644,13 +905,8 @@ def is_good_final_output(report: Dict[str, Dict[str, float]], pcc_threshold: flo
 
 
 # -----------------------------
-# Model optimization variants
+# Optimization variants
 # -----------------------------
-def export_baseline_copy(input_path: str, output_path: str):
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    shutil.copyfile(input_path, output_path)
-
-
 def export_fixed_shape_copy(
     input_path: str,
     output_path: str,
@@ -753,6 +1009,8 @@ def create_optimized_variants(
     onnxoptimizer_preset: str,
     onnxsim_skip_constant_folding: bool,
     onnxsim_skip_shape_inference: bool,
+    block_tensors: List[str],
+    block_nodes: List[str],
 ) -> Dict[str, str]:
     os.makedirs(output_dir, exist_ok=True)
     generated = {}
@@ -775,7 +1033,19 @@ def create_optimized_variants(
         out_path = os.path.join(output_dir, f"{variant}.onnx")
 
         try:
-            if variant == "ort_basic":
+            if variant == "manual_hand_opt":
+                manual_optimize_model(
+                    input_model_path=input_model_path,
+                    output_model_path=out_path,
+                    blocked_tensor_names=set(block_tensors),
+                    blocked_node_names=set(block_nodes),
+                    fix_input_shape_flag=fix_input_shape_flag,
+                    fixed_batch=fixed_batch,
+                    image_height=image_height,
+                    image_width=image_width,
+                )
+
+            elif variant == "ort_basic":
                 input_for_ort = maybe_make_fixed_tmp("ort_basic")
                 save_ort_optimized_model(
                     input_model_path=input_for_ort,
@@ -924,6 +1194,7 @@ def create_optimized_variants(
 
     return generated
 
+
 # -----------------------------
 # evaluate_model wrapper
 # -----------------------------
@@ -994,13 +1265,9 @@ def parse_args():
     parser.add_argument(
         "--variants",
         nargs="+",
-        default=[
-            "ort_basic",
-            "ort_extended",
-            "onnxoptimizer_plus_ort_extended",
-            "onnxsim_plus_ort_extended",
-        ],
+        default=["manual_hand_opt"],
         choices=[
+            "manual_hand_opt",
             "ort_basic",
             "ort_extended",
             "ort_all",
@@ -1010,7 +1277,7 @@ def parse_args():
             "onnxsim_plus_ort_basic",
             "onnxsim_plus_ort_extended",
             "onnxsim_plus_ort_all",
-        ]
+        ],
     )
 
     parser.add_argument("--fix_input_shape", action="store_true")
@@ -1025,6 +1292,25 @@ def parse_args():
 
     parser.add_argument("--onnxsim_skip_constant_folding", action="store_true")
     parser.add_argument("--onnxsim_skip_shape_inference", action="store_true")
+
+    parser.add_argument(
+        "--block_tensors",
+        nargs="*",
+        default=["4662", "4655", "output"],
+        help="Tensor names to protect from manual QDQ removal.",
+    )
+    parser.add_argument(
+        "--block_nodes",
+        nargs="*",
+        default=[],
+        help="Node names to protect from manual QDQ removal.",
+    )
+    parser.add_argument(
+        "--inspect_tensors",
+        nargs="*",
+        default=["4662"],
+        help="Tensor names to inspect in original and optimized models.",
+    )
 
     return parser.parse_args()
 
@@ -1049,6 +1335,8 @@ def main():
         onnxoptimizer_preset=args.onnxoptimizer_preset,
         onnxsim_skip_constant_folding=args.onnxsim_skip_constant_folding,
         onnxsim_skip_shape_inference=args.onnxsim_skip_shape_inference,
+        block_tensors=args.block_tensors,
+        block_nodes=args.block_nodes,
     )
 
     if not variants:
@@ -1056,6 +1344,13 @@ def main():
 
     print("[INFO] Collecting original model stats...")
     original_stats = collect_model_stats(args.qdq_model)
+
+    original_inspection = {}
+    for tensor_name in args.inspect_tensors:
+        try:
+            original_inspection[tensor_name] = inspect_tensor_context(args.qdq_model, tensor_name)
+        except Exception as e:
+            original_inspection[tensor_name] = {"error": str(e)}
 
     print("[INFO] Building loader...")
     loader = build_eval_loader(
@@ -1114,12 +1409,19 @@ def main():
             "total_compared_tensors": None,
             "debug_error": None,
             "is_numerically_good": None,
+            "inspection": {},
             "status": "ok",
             "error": None,
         }
 
         try:
             item["model_stats"] = collect_model_stats(model_path)
+
+            for tensor_name in args.inspect_tensors:
+                try:
+                    item["inspection"][tensor_name] = inspect_tensor_context(model_path, tensor_name)
+                except Exception as e:
+                    item["inspection"][tensor_name] = {"error": str(e)}
 
             model_obj = build_ort_model_obj(
                 model_path=model_path,
@@ -1199,6 +1501,10 @@ def main():
             if not item["is_numerically_good"]:
                 print(f"[WARN] Variant {name} is numerically bad. Ignore its speed result.")
 
+            for tensor_name in args.inspect_tensors:
+                print(f"[INFO] Inspection for tensor {tensor_name}:")
+                print(json.dumps(to_jsonable(item["inspection"][tensor_name]), indent=2))
+
         except Exception as e:
             item["status"] = "failed"
             item["error"] = str(e)
@@ -1210,6 +1516,7 @@ def main():
         "input_qdq_model": args.qdq_model,
         "input_qdq_model_stats": original_stats,
         "baseline_eval": baseline_eval,
+        "original_inspection": original_inspection,
         "config": {
             "variants": args.variants,
             "fix_input_shape": args.fix_input_shape,
@@ -1223,6 +1530,9 @@ def main():
             "split": args.split,
             "pcc_threshold": args.pcc_threshold,
             "cosine_threshold": args.cosine_threshold,
+            "block_tensors": args.block_tensors,
+            "block_nodes": args.block_nodes,
+            "inspect_tensors": args.inspect_tensors,
         },
         "variants_result": results,
     }
