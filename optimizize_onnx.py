@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+import argparse
+import copy
+import json
+from typing import Dict, List
+
+import numpy as np
+import onnx
+import onnxruntime as ort
+from onnx import helper, shape_inference
+
+EPS = 1e-12
+
+
+def make_session_from_model_path(
+    model_path: str,
+    provider: str = "CPUExecutionProvider",
+    enable_all_optimizations: bool = False,
+):
+    so = ort.SessionOptions()
+    so.graph_optimization_level = (
+        ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        if enable_all_optimizations
+        else ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    )
+
+    providers = (
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        if provider == "CUDAExecutionProvider"
+        else ["CPUExecutionProvider"]
+    )
+
+    return ort.InferenceSession(
+        model_path,
+        sess_options=so,
+        providers=providers,
+    )
+
+
+def make_session_from_onnx_model(
+    model: onnx.ModelProto,
+    provider: str = "CPUExecutionProvider",
+    enable_all_optimizations: bool = False,
+):
+    so = ort.SessionOptions()
+    so.graph_optimization_level = (
+        ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        if enable_all_optimizations
+        else ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    )
+
+    providers = (
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        if provider == "CUDAExecutionProvider"
+        else ["CPUExecutionProvider"]
+    )
+
+    model_bytes = model.SerializeToString()
+    return ort.InferenceSession(
+        model_bytes,
+        sess_options=so,
+        providers=providers,
+    )
+
+
+def list_input_names(session: ort.InferenceSession) -> List[str]:
+    return [x.name for x in session.get_inputs()]
+
+
+def list_output_names(session: ort.InferenceSession) -> List[str]:
+    return [x.name for x in session.get_outputs()]
+
+
+def load_sample(sample_path: str, expected_input_names: List[str]) -> Dict[str, np.ndarray]:
+    if sample_path.endswith(".npz"):
+        data = np.load(sample_path, allow_pickle=False)
+        sample = {}
+        for name in expected_input_names:
+            if name not in data:
+                raise ValueError(f"Missing input '{name}' in {sample_path}")
+            sample[name] = data[name]
+        return sample
+
+    raise ValueError("Only .npz sample input is supported in this script.")
+
+
+def flatten_float(arr: np.ndarray) -> np.ndarray:
+    if arr.dtype == np.bool_ or np.issubdtype(arr.dtype, np.integer):
+        return arr.astype(np.float32).reshape(-1)
+    return arr.astype(np.float32).reshape(-1)
+
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    a = flatten_float(a)
+    b = flatten_float(b)
+    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + EPS
+    return float(np.dot(a, b) / denom)
+
+
+def pcc(a: np.ndarray, b: np.ndarray) -> float:
+    a = flatten_float(a)
+    b = flatten_float(b)
+    if a.size == 0 or b.size == 0:
+        return 1.0
+    if np.std(a) < EPS and np.std(b) < EPS:
+        return 1.0 if np.allclose(a, b, atol=1e-6, rtol=1e-6) else 0.0
+    corr = np.corrcoef(a, b)[0, 1]
+    return 0.0 if np.isnan(corr) else float(corr)
+
+
+def compare_arrays(a: np.ndarray, b: np.ndarray) -> Dict[str, float]:
+    if a.shape != b.shape:
+        return {
+            "shape_match": 0.0,
+            "cosine": -1.0,
+            "pcc": -1.0,
+            "max_abs": float("inf"),
+            "mean_abs": float("inf"),
+        }
+
+    diff = flatten_float(a) - flatten_float(b)
+    return {
+        "shape_match": 1.0,
+        "cosine": cosine_similarity(a, b),
+        "pcc": pcc(a, b),
+        "max_abs": float(np.max(np.abs(diff))) if diff.size else 0.0,
+        "mean_abs": float(np.mean(np.abs(diff))) if diff.size else 0.0,
+    }
+
+
+def run_model(session: ort.InferenceSession, sample: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    output_names = list_output_names(session)
+    values = session.run(output_names, sample)
+    return dict(zip(output_names, values))
+
+
+def compare_model_outputs(
+    original_model_path: str,
+    optimized_model_path: str,
+    sample: Dict[str, np.ndarray],
+    provider: str = "CPUExecutionProvider",
+):
+    orig_sess = make_session_from_model_path(
+        original_model_path,
+        provider=provider,
+        enable_all_optimizations=False,
+    )
+    opt_sess = make_session_from_model_path(
+        optimized_model_path,
+        provider=provider,
+        enable_all_optimizations=False,
+    )
+
+    orig_out = run_model(orig_sess, sample)
+    opt_out = run_model(opt_sess, sample)
+
+    report = {}
+    for name in orig_out:
+        if name in opt_out:
+            report[name] = compare_arrays(orig_out[name], opt_out[name])
+
+    return report
+
+
+def collect_all_value_names(model: onnx.ModelProto) -> List[str]:
+    names = []
+    existing_outputs = set(o.name for o in model.graph.output)
+    initializers = set(i.name for i in model.graph.initializer)
+
+    for vi in model.graph.value_info:
+        if vi.name not in existing_outputs and vi.name not in initializers:
+            names.append(vi.name)
+
+    for node in model.graph.node:
+        for out in node.output:
+            if out and out not in existing_outputs and out not in initializers:
+                names.append(out)
+
+    seen = set()
+    ordered = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ordered
+
+
+def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelProto:
+    model = copy.deepcopy(model)
+
+    try:
+        model = shape_inference.infer_shapes(model)
+    except Exception:
+        pass
+
+    names = collect_all_value_names(model)
+    existing_output_names = set(o.name for o in model.graph.output)
+
+    known_value_infos = {vi.name: vi for vi in model.graph.value_info}
+    known_value_infos.update({vi.name: vi for vi in model.graph.input})
+    known_value_infos.update({vi.name: vi for vi in model.graph.output})
+
+    for name in names:
+        if name in existing_output_names:
+            continue
+
+        if name in known_value_infos:
+            model.graph.output.append(copy.deepcopy(known_value_infos[name]))
+        else:
+            model.graph.output.append(
+                helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, None)
+            )
+
+    return model
+
+
+def run_all_outputs(
+    model_path: str,
+    sample: Dict[str, np.ndarray],
+    provider: str = "CPUExecutionProvider",
+):
+    model = onnx.load(model_path)
+    model_with_all_outputs = add_all_intermediate_outputs_to_model(model)
+
+    sess = make_session_from_onnx_model(
+        model_with_all_outputs,
+        provider=provider,
+        enable_all_optimizations=False,
+    )
+
+    output_names = list_output_names(sess)
+    values = sess.run(output_names, sample)
+    return dict(zip(output_names, values))
+
+
+def compare_all_tensors(
+    original_model_path: str,
+    optimized_model_path: str,
+    sample: Dict[str, np.ndarray],
+    provider: str = "CPUExecutionProvider",
+    pcc_threshold: float = 0.99,
+    cosine_threshold: float = 0.99,
+):
+    orig_vals = run_all_outputs(original_model_path, sample, provider)
+    opt_vals = run_all_outputs(optimized_model_path, sample, provider)
+
+    common_names = [n for n in orig_vals if n in opt_vals]
+    rows = []
+
+    for name in common_names:
+        try:
+            m = compare_arrays(orig_vals[name], opt_vals[name])
+            rows.append({"name": name, **m})
+        except Exception:
+            pass
+
+    rows.sort(key=lambda x: (x["pcc"], x["cosine"], -x["max_abs"]))
+
+    first_bad = None
+    for row in rows:
+        if row["shape_match"] < 1.0:
+            first_bad = row
+            break
+        if row["pcc"] < pcc_threshold or row["cosine"] < cosine_threshold:
+            first_bad = row
+            break
+
+    return {
+        "first_bad_tensor": first_bad,
+        "worst_50_tensors": rows[:50],
+        "total_compared_tensors": len(rows),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--original_model", type=str, required=True)
+    parser.add_argument("--optimized_model", type=str, required=True)
+    parser.add_argument("--sample_npz", type=str, required=True)
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default="CPUExecutionProvider",
+        choices=["CPUExecutionProvider", "CUDAExecutionProvider"],
+    )
+    parser.add_argument("--output_json", type=str, default="onnx_compare_report.json")
+    parser.add_argument("--pcc_threshold", type=float, default=0.99)
+    parser.add_argument("--cosine_threshold", type=float, default=0.99)
+    args = parser.parse_args()
+
+    ref_sess = make_session_from_model_path(
+        args.original_model,
+        provider=args.provider,
+        enable_all_optimizations=False,
+    )
+    sample = load_sample(args.sample_npz, list_input_names(ref_sess))
+
+    final_output_report = compare_model_outputs(
+        original_model_path=args.original_model,
+        optimized_model_path=args.optimized_model,
+        sample=sample,
+        provider=args.provider,
+    )
+
+    tensor_report = compare_all_tensors(
+        original_model_path=args.original_model,
+        optimized_model_path=args.optimized_model,
+        sample=sample,
+        provider=args.provider,
+        pcc_threshold=args.pcc_threshold,
+        cosine_threshold=args.cosine_threshold,
+    )
+
+    report = {
+        "final_outputs": final_output_report,
+        "first_bad_tensor": tensor_report["first_bad_tensor"],
+        "worst_50_tensors": tensor_report["worst_50_tensors"],
+        "total_compared_tensors": tensor_report["total_compared_tensors"],
+    }
+
+    with open(args.output_json, "w") as f:
+        json.dump(report, f, indent=2)
+
+    print(f"[INFO] Wrote report to: {args.output_json}")
+    print("[INFO] Final output summary:")
+    for name, metrics in final_output_report.items():
+        print(
+            f"  {name}: "
+            f"pcc={metrics['pcc']:.6f}, "
+            f"cosine={metrics['cosine']:.6f}, "
+            f"max_abs={metrics['max_abs']:.6e}, "
+            f"mean_abs={metrics['mean_abs']:.6e}"
+        )
+
+    if report["first_bad_tensor"] is None:
+        print("[INFO] No clearly bad tensor found with current thresholds.")
+    else:
+        bad = report["first_bad_tensor"]
+        print("[INFO] First bad tensor:")
+        print(
+            f"  name={bad['name']}, "
+            f"pcc={bad['pcc']:.6f}, "
+            f"cosine={bad['cosine']:.6f}, "
+            f"max_abs={bad['max_abs']:.6e}, "
+            f"mean_abs={bad['mean_abs']:.6e}"
+        )
+
+
+if __name__ == "__main__":
+    main()

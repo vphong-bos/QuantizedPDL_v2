@@ -228,7 +228,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--seq_mse_num_batches",
         type=int,
-        default=256,
+        default=64,
         help="number of calibration batches to use for Sequential MSE",
     )
     parser.add_argument(
