@@ -50,9 +50,9 @@ def get_semantic_logits(model_obj, image, model_category_const):
 
         start_time = time.perf_counter()
         output = model_obj["model"](image)
+        end_time = time.perf_counter()
         if use_cuda:
             torch.cuda.synchronize()
-        end_time = time.perf_counter()
 
         logits = normalize_logits_output(output)
         inference_time = end_time - start_time
