@@ -75,3 +75,12 @@ def convert_syncbn_to_bn(module: nn.Module) -> nn.Module:
             setattr(module, name, convert_syncbn_to_bn(child))
 
     return module
+
+def count_custom_conv_with_bn(module: nn.Module):
+    total = 0
+    names = []
+    for name, child in module.named_modules():
+        if isinstance(child, Conv2d) and isinstance(getattr(child, "norm", None), nn.BatchNorm2d):
+            total += 1
+            names.append(name)
+    return total, names
