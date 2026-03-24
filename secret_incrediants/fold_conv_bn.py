@@ -59,50 +59,32 @@ def _fold_bn_into_conv_params(conv: nn.Conv2d, bn: nn.Module):
     else:
         conv.bias.data.copy_(b_fold)
 
-
-def fold_custom_conv_bn_inplace(module: nn.Module, prefix: str = ""):
-    """
-    Recursively fold BN/SyncBN inside custom Conv2d wrapper.
-
-    Supports patterns like:
-        Conv2d(norm=BatchNorm2d, activation=ReLU)
-        Conv2d(norm=SyncBatchNorm, activation=ReLU)
-
-    After folding:
-        norm -> Identity
-        activation stays unchanged
-    """
+def fold_sequential_conv_bn(module):
     for name, child in module.named_children():
-        full_name = f"{prefix}.{name}" if prefix else name
+        fold_sequential_conv_bn(child)
 
-        # Recurse first
-        fold_custom_conv_bn_inplace(child, full_name)
+        if isinstance(child, nn.Sequential):
+            new_modules = []
+            i = 0
+            while i < len(child):
+                m1 = child[i]
 
-        if isinstance(child, Conv2d):
-            norm = getattr(child, "norm", None)
-            act = getattr(child, "activation", None)
+                if i + 1 < len(child):
+                    m2 = child[i + 1]
 
-            if norm is None or isinstance(norm, nn.Identity):
-                continue
+                    if isinstance(m1, nn.Conv2d) and _is_supported_bn(m2):
+                        print(f"[INFO] Folding Sequential Conv+BN at {name}.{i}")
 
-            if _is_supported_bn(norm):
-                print(
-                    f"[INFO] Folding custom Conv2d+BN: {full_name} "
-                    f"(activation={type(act).__name__ if act is not None else 'None'})"
-                )
+                        _fold_bn_into_conv_params(m1, m2)
 
-                child.eval()
-                norm.eval()
+                        new_modules.append(m1)
+                        i += 2
+                        continue
 
-                _fold_bn_into_conv_params(child, norm)
+                new_modules.append(m1)
+                i += 1
 
-                # Safer than None if forward always calls self.norm(x)
-                child.norm = nn.Identity()
-            else:
-                print(
-                    f"[WARN] Skip folding for {full_name}: "
-                    f"norm is {type(norm)}, only BatchNorm2d and SyncBatchNorm are supported here."
-                )
+            child[:] = nn.Sequential(*new_modules)
 
 def count_custom_conv_with_bn(module: nn.Module):
     total = 0
