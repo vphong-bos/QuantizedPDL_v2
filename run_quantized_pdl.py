@@ -682,6 +682,7 @@ def main(args):
             output_names=["output"],
             opset_version=20,
             export_int32_bias=True,
+            prequantize_constants=True,
             dynamo=False,   # AIMET says dynamo=True is not supported here
         )
 
