@@ -1,82 +1,77 @@
 import torch
 import torch.nn as nn
 
-from model.conv2d import Conv2d
+import copy
+import torch.nn as nn
 
-def _fold_bn_into_conv_params(conv: nn.Conv2d, bn: nn.BatchNorm2d):
-    """
-    Fold BatchNorm2d into Conv2d parameters in-place.
 
-    After folding:
-      y = BN(Conv(x))  ==>  y = Conv_folded(x)
 
-    Keeps checkpoint compatibility because this runs only after loading.
-    """
-    if conv.bias is None:
-        conv_bias = torch.zeros(conv.weight.size(0), device=conv.weight.device, dtype=conv.weight.dtype)
-    else:
-        conv_bias = conv.bias.data
+def is_supported_bn(norm):
+    return isinstance(norm, (nn.BatchNorm2d, nn.SyncBatchNorm))
 
-    w = conv.weight.data
-    b = conv_bias
 
-    gamma = bn.weight.data if bn.affine else torch.ones_like(bn.running_mean)
-    beta = bn.bias.data if bn.affine else torch.zeros_like(bn.running_mean)
-    mean = bn.running_mean.data
-    var = bn.running_var.data
+def fold_conv_bn_params(conv_weight, conv_bias, bn):
+    if conv_bias is None:
+        conv_bias = torch.zeros(
+            conv_weight.shape[0],
+            device=conv_weight.device,
+            dtype=conv_weight.dtype,
+        )
+
+    gamma = bn.weight if bn.affine else torch.ones_like(bn.running_mean)
+    beta = bn.bias if bn.affine else torch.zeros_like(bn.running_mean)
+    mean = bn.running_mean
+    var = bn.running_var
     eps = bn.eps
 
-    inv_std = gamma / torch.sqrt(var + eps)
+    denom = torch.sqrt(var + eps)
+    scale = gamma / denom
 
-    # Fold weight
-    w_fold = w * inv_std.reshape([-1, 1, 1, 1])
+    view_shape = [conv_weight.shape[0]] + [1] * (conv_weight.dim() - 1)
+    folded_weight = conv_weight * scale.reshape(view_shape)
+    folded_bias = beta + (conv_bias - mean) * scale
 
-    # Fold bias
-    b_fold = beta + (b - mean) * inv_std
-
-    conv.weight.data.copy_(w_fold)
-
-    if conv.bias is None:
-        conv.bias = nn.Parameter(b_fold.clone())
-    else:
-        conv.bias.data.copy_(b_fold)
+    return folded_weight, folded_bias
 
 
-def fold_custom_conv_bn_inplace(module: nn.Module, prefix: str = ""):
-    """
-    Recursively fold BatchNorm2d inside your custom Conv2d wrapper:
-        Conv2d(..., norm=BatchNorm2d(...))
-    into the conv weights/bias, then set norm=None.
+def fold_bn_into_conv_module(conv_module, bn_module):
+    with torch.no_grad():
+        folded_weight, folded_bias = fold_conv_bn_params(
+            conv_module.weight,
+            conv_module.bias,
+            bn_module,
+        )
+        conv_module.weight.copy_(folded_weight)
 
-    This does NOT change the original checkpoint format.
-    """
+        if conv_module.bias is None:
+            conv_module.bias = nn.Parameter(folded_bias.clone())
+        else:
+            conv_module.bias.copy_(folded_bias)
+
+def convert_syncbn_to_bn(module: nn.Module) -> nn.Module:
+    module = copy.deepcopy(module)
+
     for name, child in module.named_children():
-        full_name = f"{prefix}.{name}" if prefix else name
+        if isinstance(child, nn.SyncBatchNorm):
+            new_bn = nn.BatchNorm2d(
+                num_features=child.num_features,
+                eps=child.eps,
+                momentum=child.momentum,
+                affine=child.affine,
+                track_running_stats=child.track_running_stats,
+            )
 
-        # Recurse first
-        fold_custom_conv_bn_inplace(child, full_name)
+            if child.affine:
+                new_bn.weight.data.copy_(child.weight.data)
+                new_bn.bias.data.copy_(child.bias.data)
 
-        if isinstance(child, Conv2d) and getattr(child, "norm", None) is not None:
-            if isinstance(child.norm, nn.BatchNorm2d):
-                print(f"[INFO] Folding custom Conv2d+BN: {full_name}")
-                child.eval()
-                child.norm.eval()
+            if child.track_running_stats:
+                new_bn.running_mean.data.copy_(child.running_mean.data)
+                new_bn.running_var.data.copy_(child.running_var.data)
+                new_bn.num_batches_tracked.data.copy_(child.num_batches_tracked.data)
 
-                _fold_bn_into_conv_params(child, child.norm)
+            setattr(module, name, new_bn)
+        else:
+            setattr(module, name, convert_syncbn_to_bn(child))
 
-                # Remove BN after folding
-                child.norm = None
-            else:
-                print(
-                    f"[WARN] Skip folding for {full_name}: "
-                    f"norm is {type(child.norm)}, only BatchNorm2d is supported here."
-                )
-
-def count_custom_conv_with_bn(module: nn.Module):
-    total = 0
-    names = []
-    for name, child in module.named_modules():
-        if isinstance(child, Conv2d) and isinstance(getattr(child, "norm", None), nn.BatchNorm2d):
-            total += 1
-            names.append(name)
-    return total, names
+    return module
