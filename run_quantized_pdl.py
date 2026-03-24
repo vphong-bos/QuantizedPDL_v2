@@ -22,7 +22,7 @@ from utils.image_loader import load_images
 
 from evaluation.eval_dataset import build_eval_loader
 from evaluation.eval_metrics import evaluate_model
-from secret_incrediants.fold_conv_bn import count_custom_conv_with_bn, fold_custom_conv_bn_inplace, debug_custom_conv_structure
+from secret_incrediants.fold_conv_bn import count_custom_conv_with_bn, fold_custom_conv_bn_inplace, debug_remaining_custom_conv_with_bn
 
 from aimet_torch.batch_norm_fold import fold_all_batch_norms, fold_all_batch_norms_to_scale
 from aimet_torch.cross_layer_equalization import equalize_model
@@ -364,24 +364,21 @@ def main(args):
 
     if args.enable_custom_conv_bn_fold:
         before_count, before_names = count_custom_conv_with_bn(model)
-        print(f"[INFO] Custom Conv2d+BN pairs before folding: {before_count}")
+        print(f"[INFO] Custom Conv+BN before folding: {before_count}")
 
         folded, skipped = fold_custom_conv_bn_inplace(model)
-        print(f"[INFO] Folded custom Conv2d+BN pairs: {folded}")
-        print(f"[INFO] Skipped custom Conv2d+BN pairs: {skipped}")
+        print(f"[INFO] Folded count : {folded}")
+        print(f"[INFO] Skipped count: {skipped}")
 
         after_count, after_names = count_custom_conv_with_bn(model)
-        print(f"[INFO] Custom Conv2d+BN pairs after folding: {after_count}")
+        print(f"[INFO] Custom Conv+BN after folding: {after_count}")
 
         if after_count > 0:
-            print("[INFO] Remaining Conv2d+BN names:")
+            print("[INFO] Remaining modules with BN:")
             for n in after_names[:50]:
                 print("  ", n)
 
-            debug_custom_conv_structure(
-                model,
-                match_substrings=["project_conv", "fuse_conv", "head", "center_head", "offset_head"],
-            )
+            debug_remaining_custom_conv_with_bn(model, max_items=20)
     print("Collecting calibration images...")
     all_calib_images = load_images(args.calib_images, num_iters=-1, recursive=True)
     calib_images = sample_calibration_images(all_calib_images, args.num_calib, args.seed)
