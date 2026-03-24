@@ -222,14 +222,14 @@ def export_qoperator_onnx_model(
         model_output=output_path,
         calibration_data_reader=data_reader,
         quant_format=QuantFormat.QOperator,
-        activation_type=QuantType.QInt8,
-        weight_type=QuantType.QInt8,
+        activation_type=QuantType.QUInt8,
+        weight_type=QuantType.QUInt8,
         calibrate_method=CalibrationMethod.MinMax,
-        per_channel=True,
+        per_channel=False,
     )
 
     print(f"[INFO] Saved QOperator ONNX to: {output_path}")
-
+    
 
 def main(args):
     if args.batch_size < 1:
