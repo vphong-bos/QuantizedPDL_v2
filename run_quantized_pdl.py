@@ -22,7 +22,7 @@ from utils.image_loader import load_images
 
 from evaluation.eval_dataset import build_eval_loader
 from evaluation.eval_metrics import evaluate_model
-from secret_incrediants.fold_conv_bn import count_custom_conv_with_bn, fold_custom_conv_bn_inplace, convert_syncbn_to_bn
+from secret_incrediants.fold_conv_bn import count_custom_conv_with_bn, fold_custom_conv_bn_inplace
 
 from aimet_torch.batch_norm_fold import fold_all_batch_norms, fold_all_batch_norms_to_scale
 from aimet_torch.cross_layer_equalization import equalize_model
@@ -363,8 +363,6 @@ def main(args):
     dummy_input = torch.randn(1, 3, args.image_height, args.image_width, device=args.device)
 
     if args.enable_custom_conv_bn_fold:
-        model = convert_syncbn_to_bn(model)
-
         num_before, fold_names = count_custom_conv_with_bn(model)
         print(f"[INFO] Custom Conv2d+BN pairs before folding: {num_before}")
 
