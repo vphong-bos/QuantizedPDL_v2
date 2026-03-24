@@ -22,7 +22,7 @@ from utils.image_loader import load_images
 
 from evaluation.eval_dataset import build_eval_loader
 from evaluation.eval_metrics import evaluate_model
-from secret_incrediants.fold_conv_bn import count_custom_conv_with_bn, fold_custom_conv_bn_inplace
+from secret_incrediants.fold_conv_bn import count_custom_conv_with_bn, fold_custom_conv_bn_inplace, debug_custom_conv_structure
 
 from aimet_torch.batch_norm_fold import fold_all_batch_norms, fold_all_batch_norms_to_scale
 from aimet_torch.cross_layer_equalization import equalize_model
@@ -363,18 +363,25 @@ def main(args):
     dummy_input = torch.randn(1, 3, args.image_height, args.image_width, device=args.device)
 
     if args.enable_custom_conv_bn_fold:
-        num_before, fold_names = count_custom_conv_with_bn(model)
-        print(f"[INFO] Custom Conv2d+BN pairs before folding: {num_before}")
+        before_count, before_names = count_custom_conv_with_bn(model)
+        print(f"[INFO] Custom Conv2d+BN pairs before folding: {before_count}")
 
-        if args.enable_custom_conv_bn_fold:
-            print("Applying custom Conv2d internal BN folding...")
-            fold_custom_conv_bn_inplace(model)
+        folded, skipped = fold_custom_conv_bn_inplace(model)
+        print(f"[INFO] Folded custom Conv2d+BN pairs: {folded}")
+        print(f"[INFO] Skipped custom Conv2d+BN pairs: {skipped}")
 
-            num_after, _ = count_custom_conv_with_bn(model)
-            print(f"[INFO] Custom Conv2d+BN pairs after folding: {num_after}")
-        else:
-            print("Custom Conv2d internal BN folding disabled")
+        after_count, after_names = count_custom_conv_with_bn(model)
+        print(f"[INFO] Custom Conv2d+BN pairs after folding: {after_count}")
 
+        if after_count > 0:
+            print("[INFO] Remaining Conv2d+BN names:")
+            for n in after_names[:50]:
+                print("  ", n)
+
+            debug_custom_conv_structure(
+                model,
+                match_substrings=["project_conv", "fuse_conv", "head", "center_head", "offset_head"],
+            )
     print("Collecting calibration images...")
     all_calib_images = load_images(args.calib_images, num_iters=-1, recursive=True)
     calib_images = sample_calibration_images(all_calib_images, args.num_calib, args.seed)
