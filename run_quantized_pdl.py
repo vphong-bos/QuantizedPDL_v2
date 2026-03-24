@@ -369,47 +369,6 @@ def main(args):
         num_workers=args.num_workers,
     )
 
-    EXCLUDE_LAYERS = {
-        "model.semantic_head.decoder.res5.project_conv.convs.0",
-        "model.semantic_head.decoder.res5.project_conv.convs.4.1",
-        "model.instance_head.decoder.res5.project_conv.convs.0",
-        "model.instance_head.decoder.res5.project_conv.convs.4.1",
-    }
-
-    excluded_modules = []
-    for name, module in wrapped_model.named_modules():
-        if name in EXCLUDE_LAYERS:
-            print(f"Ignoring SeqMSE, AdaRound for: {name} {module} {module.__class__}")
-            excluded_modules.append(module)
-
-    if args.enable_bias_correction:
-        print("Applying Bias Correction...")
-        bc_start = time.time()
-
-        bc_model = copy.deepcopy(wrapped_model).to(args.device).eval()
-
-        bc_model = apply_bias_correction(
-            model=bc_model,
-            calib_loader=calib_loader,
-            image_height=args.image_height,
-            image_width=args.image_width,
-            quant_scheme=args.quant_scheme,
-            default_param_bw=args.default_param_bw,
-            default_output_bw=args.default_output_bw,
-            config_file=args.config_file,
-            bias_corr_num_quant_samples=args.bias_corr_num_quant_samples,
-            bias_corr_num_bias_samples=args.bias_corr_num_bias_samples,
-            bias_corr_empirical_only=args.bias_corr_empirical_only,
-        )
-
-        copy_biases(bc_model, wrapped_model)
-        del bc_model
-
-        bc_time = time.time() - bc_start
-        print(f"Bias Correction finished in {bc_time:.2f} s")
-    else:
-        print("Bias Correction disabled")
-
     if args.enable_bn_fold:
         print("Applying batch norm folding...")
         # dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
@@ -451,6 +410,47 @@ def main(args):
         model_category_const=model_category_const,
     ).to(args.device).eval()
     wrapped_model = wrapped_model.to(args.device).eval()
+
+    EXCLUDE_LAYERS = {
+        "model.semantic_head.decoder.res5.project_conv.convs.0",
+        "model.semantic_head.decoder.res5.project_conv.convs.4.1",
+        "model.instance_head.decoder.res5.project_conv.convs.0",
+        "model.instance_head.decoder.res5.project_conv.convs.4.1",
+    }
+
+    excluded_modules = []
+    for name, module in wrapped_model.named_modules():
+        if name in EXCLUDE_LAYERS:
+            print(f"Ignoring SeqMSE, AdaRound for: {name} {module} {module.__class__}")
+            excluded_modules.append(module)
+
+    if args.enable_bias_correction:
+        print("Applying Bias Correction...")
+        bc_start = time.time()
+
+        bc_model = copy.deepcopy(wrapped_model).to(args.device).eval()
+
+        bc_model = apply_bias_correction(
+            model=bc_model,
+            calib_loader=calib_loader,
+            image_height=args.image_height,
+            image_width=args.image_width,
+            quant_scheme=args.quant_scheme,
+            default_param_bw=args.default_param_bw,
+            default_output_bw=args.default_output_bw,
+            config_file=args.config_file,
+            bias_corr_num_quant_samples=args.bias_corr_num_quant_samples,
+            bias_corr_num_bias_samples=args.bias_corr_num_bias_samples,
+            bias_corr_empirical_only=args.bias_corr_empirical_only,
+        )
+
+        copy_biases(bc_model, wrapped_model)
+        del bc_model
+
+        bc_time = time.time() - bc_start
+        print(f"Bias Correction finished in {bc_time:.2f} s")
+    else:
+        print("Bias Correction disabled")
 
     adaround_encoding_path = None
 
