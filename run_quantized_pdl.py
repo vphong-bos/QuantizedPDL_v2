@@ -369,12 +369,6 @@ def main(args):
         num_workers=args.num_workers,
     )
 
-    print("Wrapping model for AIMET tracing...")
-    wrapped_model = AimetTraceWrapper(
-        model=model,
-        model_category_const=model_category_const,
-    ).to(args.device).eval()
-
     EXCLUDE_LAYERS = {
         "model.semantic_head.decoder.res5.project_conv.convs.0",
         "model.semantic_head.decoder.res5.project_conv.convs.4.1",
@@ -421,7 +415,7 @@ def main(args):
         # dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
 
         fold_all_batch_norms(
-            model=wrapped_model,
+            model=model,
             input_shapes=(1, 3, args.image_height, args.image_width),
             dummy_input=dummy_input,
         )
@@ -451,6 +445,11 @@ def main(args):
     else:
         print("CLE disabled")
 
+    print("Wrapping model for AIMET tracing...")
+    wrapped_model = AimetTraceWrapper(
+        model=model,
+        model_category_const=model_category_const,
+    ).to(args.device).eval()
     wrapped_model = wrapped_model.to(args.device).eval()
 
     adaround_encoding_path = None
