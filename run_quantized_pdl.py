@@ -369,18 +369,6 @@ def main(args):
         num_workers=args.num_workers,
     )
 
-    if args.enable_bn_fold:
-        print("Applying batch norm folding...")
-        # dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
-
-        fold_all_batch_norms(
-            model=model,
-            input_shapes=(1, 3, args.image_height, args.image_width),
-            dummy_input=dummy_input,
-        )
-    else:
-        print("BN folding disabled")
-
     if args.enable_cle:
         print("Applying Cross-Layer Equalization (CLE)...")
         cle_start = time.time()
@@ -423,6 +411,18 @@ def main(args):
         if name in EXCLUDE_LAYERS:
             print(f"Ignoring SeqMSE, AdaRound for: {name} {module} {module.__class__}")
             excluded_modules.append(module)
+
+    if args.enable_bn_fold:
+        print("Applying batch norm folding...")
+        # dummy_input_cpu = torch.randn(1, 3, args.image_height, args.image_width, device="cpu")
+
+        fold_all_batch_norms(
+            model=wrapped_model,
+            input_shapes=(1, 3, args.image_height, args.image_width),
+            dummy_input=dummy_input,
+        )
+    else:
+        print("BN folding disabled")
 
     if args.enable_bias_correction:
         print("Applying Bias Correction...")
