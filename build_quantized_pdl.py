@@ -184,7 +184,6 @@ def collect_onnx_op_counts(model_path: str):
     print(f"  QLinearMatMul   : {op_counts.get('QLinearMatMul', 0)}")
     return op_counts
 
-
 def export_qoperator_onnx_model(
     fp32_onnx_path: str,
     output_path: str,
@@ -315,7 +314,6 @@ def main(args):
             print("[WARN] QOperator export produced no QLinearConv/QLinearMatMul.")
         else:
             print("[INFO] QOperator export looks valid.")
-
 
 if __name__ == "__main__":
     args = parse_args()
