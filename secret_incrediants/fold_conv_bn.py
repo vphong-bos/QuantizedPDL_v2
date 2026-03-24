@@ -12,10 +12,13 @@ def _fold_bn_into_conv_params(conv: nn.Conv2d, bn: nn.Module):
     """
     Fold BatchNorm2d or SyncBatchNorm into Conv2d parameters in-place.
 
-    After folding:
-      y = BN(Conv(x))  ==>  y = Conv_folded(x)
+    Valid for:
+        Conv -> BN
+        Conv -> BN -> ReLU
+        Conv -> BN -> other activation
 
-    Keeps checkpoint compatibility because this runs only after loading.
+    After folding:
+      y = Act(BN(Conv(x)))  ==>  y = Act(Conv_folded(x))
     """
     if not _is_supported_bn(bn):
         raise TypeError(
@@ -43,10 +46,10 @@ def _fold_bn_into_conv_params(conv: nn.Conv2d, bn: nn.Module):
 
     inv_std = gamma / torch.sqrt(var + eps)
 
-    # Fold weight
-    w_fold = w * inv_std.reshape([-1, 1, 1, 1])
+    # General shape for Conv1d/2d/3d-style weights
+    reshape_dims = [-1] + [1] * (w.dim() - 1)
 
-    # Fold bias
+    w_fold = w * inv_std.reshape(reshape_dims)
     b_fold = beta + (b - mean) * inv_std
 
     conv.weight.data.copy_(w_fold)
@@ -59,12 +62,15 @@ def _fold_bn_into_conv_params(conv: nn.Conv2d, bn: nn.Module):
 
 def fold_custom_conv_bn_inplace(module: nn.Module, prefix: str = ""):
     """
-    Recursively fold BatchNorm2d or SyncBatchNorm inside your custom Conv2d wrapper:
-        Conv2d(..., norm=BatchNorm2d(...))
-        Conv2d(..., norm=SyncBatchNorm(...))
-    into the conv weights/bias, then set norm=None.
+    Recursively fold BN/SyncBN inside custom Conv2d wrapper.
 
-    This does NOT change the original checkpoint format.
+    Supports patterns like:
+        Conv2d(norm=BatchNorm2d, activation=ReLU)
+        Conv2d(norm=SyncBatchNorm, activation=ReLU)
+
+    After folding:
+        norm -> Identity
+        activation stays unchanged
     """
     for name, child in module.named_children():
         full_name = f"{prefix}.{name}" if prefix else name
@@ -72,22 +78,31 @@ def fold_custom_conv_bn_inplace(module: nn.Module, prefix: str = ""):
         # Recurse first
         fold_custom_conv_bn_inplace(child, full_name)
 
-        if isinstance(child, Conv2d) and getattr(child, "norm", None) is not None:
-            if _is_supported_bn(child.norm):
-                print(f"[INFO] Folding custom Conv2d+BN: {full_name}")
+        if isinstance(child, Conv2d):
+            norm = getattr(child, "norm", None)
+            act = getattr(child, "activation", None)
+
+            if norm is None or isinstance(norm, nn.Identity):
+                continue
+
+            if _is_supported_bn(norm):
+                print(
+                    f"[INFO] Folding custom Conv2d+BN: {full_name} "
+                    f"(activation={type(act).__name__ if act is not None else 'None'})"
+                )
+
                 child.eval()
-                child.norm.eval()
+                norm.eval()
 
-                _fold_bn_into_conv_params(child, child.norm)
+                _fold_bn_into_conv_params(child, norm)
 
-                # Remove BN after folding
-                child.norm = None
+                # Safer than None if forward always calls self.norm(x)
+                child.norm = nn.Identity()
             else:
                 print(
                     f"[WARN] Skip folding for {full_name}: "
-                    f"norm is {type(child.norm)}, only BatchNorm2d and SyncBatchNorm are supported here."
+                    f"norm is {type(norm)}, only BatchNorm2d and SyncBatchNorm are supported here."
                 )
-
 
 def count_custom_conv_with_bn(module: nn.Module):
     total = 0
