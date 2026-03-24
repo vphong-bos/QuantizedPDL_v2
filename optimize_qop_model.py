@@ -1,95 +1,89 @@
 #!/usr/bin/env python3
 import argparse
-import json
 import os
-from collections import Counter
-from typing import Dict, List
+import copy
+import time
 
 import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
+
 from onnxruntime.quantization import (
+    quantize_static,
     CalibrationDataReader,
-    CalibrationMethod,
     QuantFormat,
     QuantType,
-    quantize_static,
+    CalibrationMethod,
 )
 
+from model.pdl import build_model
+
+from quantization.calibration_dataset import (
+    create_calibration_loader,
+    sample_calibration_images,
+)
+from quantization.quantize_function import (
+    AimetTraceWrapper,
+    create_quant_sim,
+    calibration_forward_pass,
+)
+from quantization.bias_correction import apply_bias_correction, copy_biases
+from utils.image_loader import load_images
+
 from evaluation.eval_dataset import build_eval_loader
+from evaluation.eval_metrics import evaluate_model
+from secret_incrediants.fold_conv_bn import (
+    count_custom_conv_with_bn,
+    fold_custom_conv_bn_inplace,
+    debug_remaining_custom_conv_with_bn,
+)
+
+from aimet_torch.batch_norm_fold import fold_all_batch_norms, fold_all_batch_norms_to_scale
+from aimet_torch.cross_layer_equalization import equalize_model
+from aimet_torch.adaround.adaround_weight import Adaround, AdaroundParameters
+from aimet_torch.quant_analyzer import QuantAnalyzer
+from aimet_torch.seq_mse import apply_seq_mse, SeqMseParams
+from aimet_torch.bn_reestimation import reestimate_bn_stats
+from aimet_common.utils import CallbackFunc
+from aimet_torch import quantsim, onnx as aimet_onnx
+
+from aimet_torch.v2.nn import QuantizationMixin
+from model.conv2d import Conv2d
+from model.quantized_conv2d import QuantizedConv2d
 
 
-# -----------------------------
-# JSON helpers
-# -----------------------------
-def to_jsonable(obj):
-    if isinstance(obj, dict):
-        return {str(k): to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [to_jsonable(v) for v in obj]
-    if isinstance(obj, tuple):
-        return [to_jsonable(v) for v in obj]
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, np.generic):
-        return obj.item()
-    if torch.is_tensor(obj):
-        return obj.detach().cpu().tolist()
-    return obj
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--weights_path", type=str, required=True)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+
+    parser.add_argument("--model_category", type=str, default="PANOPTIC_DEEPLAB",
+                        choices=["DEEPLAB_V3_PLUS", "PANOPTIC_DEEPLAB"])
+
+    parser.add_argument("--image_height", type=int, default=512)
+    parser.add_argument("--image_width", type=int, default=1024)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--num_workers", type=int, default=2)
+
+    parser.add_argument("--cityscapes_root", type=str, default=None)
+    parser.add_argument("--eval_split", type=str, default="val", choices=["test", "val"])
+
+    parser.add_argument("--calib_images", type=str, required=True)
+    parser.add_argument("--num_calib", type=int, default=50)
+    parser.add_argument("--seed", type=int, default=123)
+
+    parser.add_argument("--export_path", type=str, default="quantized_export")
+    parser.add_argument("--enable_custom_conv_bn_fold", action="store_true")
+
+    parser.add_argument("--export_qoperator", action="store_true")
+    parser.add_argument("--qop_name", type=str, default="model_qop.onnx")
+    parser.add_argument("--calib_max_samples", type=int, default=-1)
+
+    return parser.parse_args()
 
 
-# -----------------------------
-# ORT helpers
-# -----------------------------
-def make_session_from_model_path(
-    model_path: str,
-    provider: str = "CPUExecutionProvider",
-):
-    so = ort.SessionOptions()
-    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-
-    providers = (
-        ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        if provider == "CUDAExecutionProvider"
-        else ["CPUExecutionProvider"]
-    )
-
-    return ort.InferenceSession(
-        model_path,
-        sess_options=so,
-        providers=providers,
-    )
-
-
-def list_input_names(session: ort.InferenceSession) -> List[str]:
-    return [x.name for x in session.get_inputs()]
-
-
-# -----------------------------
-# Model stats
-# -----------------------------
-def collect_model_stats(model_path: str) -> Dict:
-    model = onnx.load(model_path)
-    op_counts = Counter(node.op_type for node in model.graph.node)
-
-    return {
-        "model_path": model_path,
-        "num_nodes": len(model.graph.node),
-        "num_initializers": len(model.graph.initializer),
-        "model_size_bytes": os.path.getsize(model_path),
-        "op_counts": dict(sorted(op_counts.items())),
-        "num_quantizelinear": op_counts.get("QuantizeLinear", 0),
-        "num_dequantizelinear": op_counts.get("DequantizeLinear", 0),
-        "num_qlinearconv": op_counts.get("QLinearConv", 0),
-        "num_qlinearmatmul": op_counts.get("QLinearMatMul", 0),
-        "num_conv": op_counts.get("Conv", 0),
-    }
-
-
-# -----------------------------
-# Loader helpers
-# -----------------------------
 def _to_numpy(x):
     if isinstance(x, np.ndarray):
         return x
@@ -138,73 +132,11 @@ def _find_first_numeric_tensor(obj):
     return None
 
 
-def _debug_print_batch(batch, prefix="[DEBUG]"):
-    print(f"{prefix} batch type: {type(batch)}")
-
-    if torch.is_tensor(batch):
-        print(f"{prefix} tensor shape={tuple(batch.shape)} dtype={batch.dtype}")
-        return
-
-    if isinstance(batch, np.ndarray):
-        print(f"{prefix} ndarray shape={batch.shape} dtype={batch.dtype}")
-        return
-
-    if isinstance(batch, dict):
-        for k, v in batch.items():
-            if torch.is_tensor(v):
-                print(f"{prefix} dict[{k}] -> tensor shape={tuple(v.shape)} dtype={v.dtype}")
-            elif isinstance(v, np.ndarray):
-                print(f"{prefix} dict[{k}] -> ndarray shape={v.shape} dtype={v.dtype}")
-            else:
-                print(f"{prefix} dict[{k}] -> type={type(v)}")
-        return
-
-    if isinstance(batch, (tuple, list)):
-        for i, v in enumerate(batch):
-            if torch.is_tensor(v):
-                print(f"{prefix} batch[{i}] -> tensor shape={tuple(v.shape)} dtype={v.dtype}")
-            elif isinstance(v, np.ndarray):
-                print(f"{prefix} batch[{i}] -> ndarray shape={v.shape} dtype={v.dtype}")
-            else:
-                print(f"{prefix} batch[{i}] -> type={type(v)}")
-
-
-# -----------------------------
-# Quantization helpers
-# -----------------------------
-def quant_type_from_name(name: str) -> QuantType:
-    if name == "QInt8":
-        return QuantType.QInt8
-    if name == "QUInt8":
-        return QuantType.QUInt8
-    raise ValueError(f"Unknown quant type: {name}")
-
-
-def calibration_method_from_name(name: str) -> CalibrationMethod:
-    if name == "MinMax":
-        return CalibrationMethod.MinMax
-    if name == "Entropy":
-        return CalibrationMethod.Entropy
-    if name == "Percentile":
-        return CalibrationMethod.Percentile
-    raise ValueError(f"Unknown calibration method: {name}")
-
-
 class LoaderCalibrationDataReader(CalibrationDataReader):
-    def __init__(
-        self,
-        loader,
-        input_names: List[str],
-        max_samples: int = 50,
-        debug_batch: bool = False,
-    ):
-        if len(input_names) != 1:
-            raise ValueError(f"Expected exactly 1 input, got {input_names}")
-
+    def __init__(self, loader, input_name, max_samples=-1):
         self.loader = loader
-        self.input_name = input_names[0]
+        self.input_name = input_name
         self.max_samples = max_samples
-        self.debug_batch = debug_batch
         self._iter = None
         self._count = 0
         self.rewind()
@@ -218,14 +150,12 @@ class LoaderCalibrationDataReader(CalibrationDataReader):
         except StopIteration:
             return None
 
-        if self.debug_batch and self._count == 0:
-            _debug_print_batch(batch, prefix="[DEBUG][CALIB]")
-
         image = _find_first_numeric_tensor(batch)
         if image is None:
-            raise ValueError(f"Could not find numeric tensor in batch type: {type(batch)}")
+            raise ValueError(f"Could not find numeric tensor in calibration batch type: {type(batch)}")
 
         image = _to_numpy(image)
+
         if image.dtype != np.float32:
             image = image.astype(np.float32)
 
@@ -240,197 +170,153 @@ class LoaderCalibrationDataReader(CalibrationDataReader):
         self._count = 0
 
 
-def export_qoperator_static(
-    input_model_path: str,
-    output_model_path: str,
-    cityscapes_root: str,
-    split: str,
-    image_width: int,
-    image_height: int,
-    batch_size: int,
-    num_workers: int,
-    provider: str,
-    calib_samples: int,
-    activation_type: str,
-    weight_type: str,
-    calibration_method: str,
-    debug_batch: bool,
+def collect_onnx_op_counts(model_path: str):
+    model = onnx.load(model_path)
+    op_counts = {}
+    for node in model.graph.node:
+        op_counts[node.op_type] = op_counts.get(node.op_type, 0) + 1
+
+    print(f"[INFO] ONNX stats for: {model_path}")
+    print(f"  Conv            : {op_counts.get('Conv', 0)}")
+    print(f"  QuantizeLinear  : {op_counts.get('QuantizeLinear', 0)}")
+    print(f"  DequantizeLinear: {op_counts.get('DequantizeLinear', 0)}")
+    print(f"  QLinearConv     : {op_counts.get('QLinearConv', 0)}")
+    print(f"  QLinearMatMul   : {op_counts.get('QLinearMatMul', 0)}")
+    return op_counts
+
+
+def export_qoperator_onnx_model(
+    fp32_onnx_path: str,
+    output_path: str,
+    calib_loader,
+    provider: str = "CPUExecutionProvider",
+    calib_samples: int = -1,
 ):
-    os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    sess = make_session_from_model_path(
-        input_model_path,
-        provider=provider,
+    providers = (
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        if provider == "CUDAExecutionProvider"
+        else ["CPUExecutionProvider"]
     )
-    input_names = list_input_names(sess)
 
-    loader = build_eval_loader(
-        cityscapes_root=cityscapes_root,
-        split=split,
-        image_width=image_width,
-        image_height=image_height,
-        batch_size=batch_size,
-        num_workers=num_workers,
-    )
+    print("[INFO] Creating ORT session for QOperator export...")
+    sess = ort.InferenceSession(fp32_onnx_path, providers=providers)
+
+    input_names = [x.name for x in sess.get_inputs()]
+    if len(input_names) != 1:
+        raise ValueError(f"Expected exactly 1 ONNX input, got {input_names}")
+
+    input_name = input_names[0]
+    print(f"[INFO] Using ONNX input name: {input_name}")
 
     data_reader = LoaderCalibrationDataReader(
-        loader=loader,
-        input_names=input_names,
+        loader=calib_loader,
+        input_name=input_name,
         max_samples=calib_samples,
-        debug_batch=debug_batch,
     )
 
+    print("[INFO] Running ORT static quantization to QOperator...")
     quantize_static(
-        model_input=input_model_path,
-        model_output=output_model_path,
+        model_input=fp32_onnx_path,
+        model_output=output_path,
         calibration_data_reader=data_reader,
         quant_format=QuantFormat.QOperator,
-        activation_type=quant_type_from_name(activation_type),
-        weight_type=quant_type_from_name(weight_type),
-        calibrate_method=calibration_method_from_name(calibration_method),
+        activation_type=QuantType.QInt8,
+        weight_type=QuantType.QInt8,
+        calibrate_method=CalibrationMethod.MinMax,
+        per_channel=True,
     )
 
-    if not os.path.exists(output_model_path):
-        raise RuntimeError(f"QOperator export failed: {output_model_path}")
+    print(f"[INFO] Saved QOperator ONNX to: {output_path}")
 
 
-# -----------------------------
-# Main
-# -----------------------------
-def parse_args():
-    parser = argparse.ArgumentParser()
+def main(args):
+    if args.batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
 
-    parser.add_argument("--cityscapes_root", type=str, required=True)
-    parser.add_argument("--qdq_model", type=str, required=True)
-    parser.add_argument(
-        "--fp32_model",
-        type=str,
-        default=None,
-        help="FP32 ONNX model path. Required for actual QOperator export.",
+    os.makedirs(args.export_path, exist_ok=True)
+
+    print("Loading FP32 model...")
+    model, model_category_const = build_model(
+        weights_path=args.weights_path,
+        model_category=args.model_category,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        device=args.device,
+    )
+    model = model.to(args.device).eval()
+    dummy_input = torch.randn(1, 3, args.image_height, args.image_width, device=args.device)
+
+    if args.enable_custom_conv_bn_fold:
+        before_count, before_names = count_custom_conv_with_bn(model)
+        print(f"[INFO] Custom Conv+BN before folding: {before_count}")
+
+        folded, skipped = fold_custom_conv_bn_inplace(model)
+        print(f"[INFO] Folded count : {folded}")
+        print(f"[INFO] Skipped count: {skipped}")
+
+        after_count, after_names = count_custom_conv_with_bn(model)
+        print(f"[INFO] Custom Conv+BN after folding: {after_count}")
+
+        if after_count > 0:
+            print("[INFO] Remaining modules with BN:")
+            for n in after_names[:50]:
+                print("  ", n)
+            debug_remaining_custom_conv_with_bn(model, max_items=20)
+
+    fp32_onnx_path = os.path.join(args.export_path, "model_fp32.onnx")
+    qop_onnx_path = os.path.join(args.export_path, args.qop_name)
+
+    print("[INFO] Exporting plain FP32 ONNX...")
+    torch.onnx.export(
+        model,
+        dummy_input,
+        fp32_onnx_path,
+        input_names=["input"],
+        output_names=["output"],
+        opset_version=20,
+        do_constant_folding=True,
+        dynamo=False,
     )
 
-    parser.add_argument("--image_height", type=int, default=512)
-    parser.add_argument("--image_width", type=int, default=1024)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--split", type=str, default="val", choices=["test", "val"])
-
-    parser.add_argument(
-        "--provider",
-        type=str,
-        default="CPUExecutionProvider",
-        choices=["CPUExecutionProvider", "CUDAExecutionProvider"],
-    )
-
-    parser.add_argument("--debug_batch", action="store_true")
-    parser.add_argument("--output_dir", type=str, default="onnx_qop_convert")
-    parser.add_argument("--report_json", type=str, default="qop_convert_report.json")
-
-    parser.add_argument("--calib_samples", type=int, default=50)
-    parser.add_argument(
-        "--qoperator_activation_type",
-        type=str,
-        default="QInt8",
-        choices=["QInt8", "QUInt8"],
-    )
-    parser.add_argument(
-        "--qoperator_weight_type",
-        type=str,
-        default="QInt8",
-        choices=["QInt8", "QUInt8"],
-    )
-    parser.add_argument(
-        "--qoperator_calibration_method",
-        type=str,
-        default="MinMax",
-        choices=["MinMax", "Entropy", "Percentile"],
-    )
-
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    output_model_path = os.path.join(args.output_dir, "model_qoperator.onnx")
-    report_path = os.path.join(args.output_dir, args.report_json)
-
-    input_qdq_stats = collect_model_stats(args.qdq_model)
-
-    result = {
-        "input_qdq_model": args.qdq_model,
-        "input_qdq_model_stats": input_qdq_stats,
-        "fp32_model": args.fp32_model,
-        "output_qoperator_model": None,
-        "output_qoperator_stats": None,
-        "status": "failed",
-        "error": None,
-        "config": {
-            "split": args.split,
-            "image_height": args.image_height,
-            "image_width": args.image_width,
-            "batch_size": args.batch_size,
-            "num_workers": args.num_workers,
-            "provider": args.provider,
-            "calib_samples": args.calib_samples,
-            "qoperator_activation_type": args.qoperator_activation_type,
-            "qoperator_weight_type": args.qoperator_weight_type,
-            "qoperator_calibration_method": args.qoperator_calibration_method,
-        },
-    }
-
-    try:
-        if args.fp32_model is None:
-            raise ValueError(
-                "Direct QDQ -> QOperator conversion is not implemented here. "
-                "Pass --fp32_model and this tool will generate a real QOperator model from FP32."
-            )
-
-        print("[INFO] Exporting QOperator model from FP32 ONNX...")
-        export_qoperator_static(
-            input_model_path=args.fp32_model,
-            output_model_path=output_model_path,
-            cityscapes_root=args.cityscapes_root,
-            split=args.split,
-            image_width=args.image_width,
-            image_height=args.image_height,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            provider=args.provider,
-            calib_samples=args.calib_samples,
-            activation_type=args.qoperator_activation_type,
-            weight_type=args.qoperator_weight_type,
-            calibration_method=args.qoperator_calibration_method,
-            debug_batch=args.debug_batch,
+    fp32_stats = collect_onnx_op_counts(fp32_onnx_path)
+    if fp32_stats.get("QuantizeLinear", 0) > 0 or fp32_stats.get("DequantizeLinear", 0) > 0:
+        raise RuntimeError(
+            "Exported FP32 ONNX still contains QuantizeLinear/DequantizeLinear. "
+            "This is not a plain FP32 ONNX."
         )
 
-        output_stats = collect_model_stats(output_model_path)
+    print("Collecting calibration images...")
+    all_calib_images = load_images(args.calib_images, num_iters=-1, recursive=True)
+    calib_images = sample_calibration_images(all_calib_images, args.num_calib, args.seed)
+    print(f"Found {len(all_calib_images)} candidate calibration images")
+    print(f"Using {len(calib_images)} images for calibration")
 
-        result["output_qoperator_model"] = output_model_path
-        result["output_qoperator_stats"] = output_stats
-        result["status"] = "ok"
+    calib_loader = create_calibration_loader(
+        calib_image_paths=calib_images,
+        image_width=args.image_width,
+        image_height=args.image_height,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+    )
 
-        print("[INFO] Input QDQ stats:")
-        print(json.dumps(to_jsonable(input_qdq_stats), indent=2))
+    if args.export_qoperator:
+        export_qoperator_onnx_model(
+            fp32_onnx_path=fp32_onnx_path,
+            output_path=qop_onnx_path,
+            calib_loader=calib_loader,
+            provider="CPUExecutionProvider",
+            calib_samples=args.calib_max_samples,
+        )
 
-        print("[INFO] Output QOperator stats:")
-        print(json.dumps(to_jsonable(output_stats), indent=2))
-
-        if output_stats["num_qlinearconv"] == 0 and output_stats["num_qlinearmatmul"] == 0:
-            print("[WARN] Output model has no QLinearConv/QLinearMatMul. Check calibration path and source model.")
+        qop_stats = collect_onnx_op_counts(qop_onnx_path)
+        if qop_stats.get("QLinearConv", 0) == 0 and qop_stats.get("QLinearMatMul", 0) == 0:
+            print("[WARN] QOperator export produced no QLinearConv/QLinearMatMul.")
         else:
-            print("[INFO] QOperator conversion looks valid.")
-
-    except Exception as e:
-        result["error"] = str(e)
-        print(f"[ERROR] {e}")
-
-    with open(report_path, "w") as f:
-        json.dump(to_jsonable(result), f, indent=2)
-
-    print(f"[INFO] Wrote report to: {report_path}")
+            print("[INFO] QOperator export looks valid.")
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(args)
