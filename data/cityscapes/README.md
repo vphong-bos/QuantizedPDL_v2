@@ -1,1 +1,0 @@
-Please find your cityscapes data at [https://www.cityscapes-dataset.com/downloads/] and put it here.
