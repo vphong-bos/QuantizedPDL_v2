@@ -308,7 +308,7 @@ def main(args):
             fp32_onnx_path=fp32_onnx_path,
             output_path=qop_onnx_path,
             calib_loader=calib_loader,
-            provider="CPUExecutionProvider",
+            provider="CUDAExecutionProvider",
             calib_samples=args.calib_max_samples,
         )
 
