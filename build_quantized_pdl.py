@@ -225,7 +225,6 @@ def export_qoperator_onnx_model(
         weight_type=QuantType.QInt8,
         calibrate_method=CalibrationMethod.MinMax,
         per_channel=True,
-        optimize_model=True,
         extra_options={
             "ActivationSymmetric": True,
             "WeightSymmetric": True,
