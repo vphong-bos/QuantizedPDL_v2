@@ -215,20 +215,23 @@ def export_qoperator_onnx_model(
         max_samples=calib_samples,
     )
 
-    print("[INFO] Running ORT static quantization to QOperator...")
+    print("[INFO] Running ORT static quantization to QOperator (fully symmetric)...")
     quantize_static(
         model_input=fp32_onnx_path,
         model_output=output_path,
         calibration_data_reader=data_reader,
         quant_format=QuantFormat.QOperator,
-        activation_type=QuantType.QUInt8,
-        weight_type=QuantType.QUInt8,
+        activation_type=QuantType.QInt8,
+        weight_type=QuantType.QInt8,
         calibrate_method=CalibrationMethod.MinMax,
         per_channel=False,
+        extra_options={
+            "ActivationSymmetric": True,
+            "WeightSymmetric": True,
+        },
     )
 
     print(f"[INFO] Saved QOperator ONNX to: {output_path}")
-    
 
 def main(args):
     if args.batch_size < 1:
