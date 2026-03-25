@@ -531,7 +531,7 @@ def main(args):
             default_param_bw=args.default_param_bw,
             default_quant_scheme=args.quant_scheme,
             default_config_file=args.config_file,
-            ignore_quant_ops_list=excluded_modules,
+            # ignore_quant_ops_list=excluded_modules,
         )
 
         adaround_encoding_path = os.path.join(
