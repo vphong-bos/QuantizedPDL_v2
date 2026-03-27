@@ -74,6 +74,44 @@ class CleTraceWrapper(torch.nn.Module):
             "Return a tensor, tuple/list of tensors, or dict of tensors."
         )
 
+class TraceOnlyTensorOutputWrapper(torch.nn.Module):
+    def __init__(self, model: torch.nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        out = self.model(x)
+
+        if torch.is_tensor(out):
+            return out
+
+        if isinstance(out, dict):
+            for key in ["out", "logits", "pred", "prediction", "output"]:
+                if key in out and torch.is_tensor(out[key]):
+                    return out[key]
+
+            tensor_dict = {k: v for k, v in out.items() if torch.is_tensor(v)}
+            if len(tensor_dict) == 0:
+                raise RuntimeError("Model output dict contains no tensor values.")
+            if len(tensor_dict) == 1:
+                return next(iter(tensor_dict.values()))
+            return tensor_dict
+
+        if isinstance(out, (tuple, list)):
+            tensor_items = tuple(v for v in out if torch.is_tensor(v))
+            if len(tensor_items) == 0:
+                raise RuntimeError("Model output tuple/list contains no tensor values.")
+            if len(tensor_items) == 1:
+                return tensor_items[0]
+            return tensor_items
+
+        for attr in ["logits", "pred", "prediction", "out", "output"]:
+            if hasattr(out, attr):
+                value = getattr(out, attr)
+                if torch.is_tensor(value):
+                    return value
+
+        raise RuntimeError(f"Unsupported output type for tracing: {type(out)}")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -363,11 +401,17 @@ def maybe_fold_all_batch_norms(
     model.eval()
 
     try:
+        wrapped_model = TraceOnlyTensorOutputWrapper(model)
+
         with torch.no_grad():
-            folded_pairs = fold_all_batch_norms(model, input_shapes=dummy_input.shape)
+            folded_pairs = fold_all_batch_norms(
+                wrapped_model,
+                input_shapes=tuple(dummy_input.shape),
+            )
 
         num_folded = len(folded_pairs) if folded_pairs is not None else 0
         print(f"[INFO] AIMET BN fold completed. Folded pairs: {num_folded}")
+
     except Exception as e:
         print(f"[WARN] AIMET BN fold failed and will be skipped: {e}")
 
