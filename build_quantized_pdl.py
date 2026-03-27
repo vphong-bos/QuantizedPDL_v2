@@ -393,35 +393,41 @@ def build_calibration_loader(args: argparse.Namespace):
         num_workers=args.num_workers,
     )
 
+from onnxruntime.quantization import QuantFormat, QuantType
+
 def resolve_quant_config(
     quant_format_name: str,
     activation_type_name: str,
     weight_type_name: str,
     per_channel: bool,
+    force_qoperator: bool = False,
 ):
     quant_format = get_quant_format(quant_format_name)
     activation_type = get_quant_type(activation_type_name)
     weight_type = get_quant_type(weight_type_name)
 
-    # ORT recommendation: x64 int8/int8 should prefer QDQ
-    if (
-        quant_format == QuantFormat.QOperator
-        and activation_type == QuantType.QInt8
-        and weight_type == QuantType.QInt8
-    ):
-        print(
-            "[WARN] QOperator + QInt8/QInt8 is not recommended on x64. "
-            "Switching quant format to QDQ."
-        )
-        quant_format = QuantFormat.QDQ
+    if force_qoperator:
+        quant_format = QuantFormat.QOperator
 
-    # Safer path for QOperator exports
-    if quant_format == QuantFormat.QOperator and per_channel:
-        print(
-            "[WARN] Disabling per-channel for QOperator export to avoid "
-            "broadcast/requantization issues."
-        )
-        per_channel = False
+    # Force a QOperator-safe dtype combo.
+    if quant_format == QuantFormat.QOperator:
+        # Avoid S8S8 QOperator on x64.
+        if activation_type == QuantType.QInt8 and weight_type == QuantType.QInt8:
+            print(
+                "[WARN] QOperator + QInt8/QInt8 is not a good x64 path. "
+                "Switching to QUInt8 activations + QInt8 weights (U8S8) "
+                "to ensure true QOperator export."
+            )
+            activation_type = QuantType.QUInt8
+            weight_type = QuantType.QInt8
+
+        # Safer default for QOperator
+        if per_channel:
+            print(
+                "[WARN] Disabling per-channel for QOperator export to avoid "
+                "weight/bias broadcast and requantization issues."
+            )
+            per_channel = False
 
     return quant_format, activation_type, weight_type, per_channel
 
