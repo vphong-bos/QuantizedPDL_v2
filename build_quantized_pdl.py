@@ -32,6 +32,46 @@ from utils.image_loader import load_images
 
 from aimet_torch.cross_layer_equalization import equalize_model
 
+class CleTraceWrapper(torch.nn.Module):
+    def __init__(self, model: torch.nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        out = self.model(x)
+
+        # Case 1: already a tensor
+        if torch.is_tensor(out):
+            return out
+
+        # Case 2: dict -> keep only tensor values
+        if isinstance(out, dict):
+            tensor_items = {k: v for k, v in out.items() if torch.is_tensor(v)}
+            if len(tensor_items) == 0:
+                raise RuntimeError("Model output dict contains no tensor values for CLE tracing.")
+            return tensor_items
+
+        # Case 3: tuple/list -> keep only tensor elements
+        if isinstance(out, (tuple, list)):
+            tensor_items = tuple(v for v in out if torch.is_tensor(v))
+            if len(tensor_items) == 0:
+                raise RuntimeError("Model output tuple/list contains no tensor values for CLE tracing.")
+            if len(tensor_items) == 1:
+                return tensor_items[0]
+            return tensor_items
+
+        # Case 4: custom object with common tensor attributes
+        for attr in ["logits", "pred", "prediction", "out", "output"]:
+            if hasattr(out, attr):
+                value = getattr(out, attr)
+                if torch.is_tensor(value):
+                    return value
+
+        raise RuntimeError(
+            f"Unsupported model output type for CLE tracing: {type(out)}. "
+            "Return a tensor, tuple/list of tensors, or dict of tensors."
+        )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -311,8 +351,10 @@ def maybe_run_cle(model: torch.nn.Module, dummy_input: torch.Tensor, enabled: bo
     was_training = model.training
     model.eval()
 
+    wrapped_model = CleTraceWrapper(model)
+
     with torch.no_grad():
-        equalize_model(model, dummy_input=dummy_input)
+        equalize_model(wrapped_model, dummy_input=dummy_input)
 
     if was_training:
         model.train()
