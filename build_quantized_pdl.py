@@ -129,6 +129,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--activation_symmetric", action="store_true")
     parser.add_argument("--weight_symmetric", action="store_true", default=True)
     parser.add_argument("--disable_weight_symmetric", action="store_true")
+    parser.add_argument(
+        "--force_qoperator",
+        action="store_true",
+        help="Force true QOperator export. Internally switches to a QOperator-safe dtype combo if needed.",
+    )
 
     return parser.parse_args()
 
@@ -388,6 +393,37 @@ def build_calibration_loader(args: argparse.Namespace):
         num_workers=args.num_workers,
     )
 
+def resolve_quant_config(
+    quant_format_name: str,
+    activation_type_name: str,
+    weight_type_name: str,
+    per_channel: bool,
+):
+    quant_format = get_quant_format(quant_format_name)
+    activation_type = get_quant_type(activation_type_name)
+    weight_type = get_quant_type(weight_type_name)
+
+    # ORT recommendation: x64 int8/int8 should prefer QDQ
+    if (
+        quant_format == QuantFormat.QOperator
+        and activation_type == QuantType.QInt8
+        and weight_type == QuantType.QInt8
+    ):
+        print(
+            "[WARN] QOperator + QInt8/QInt8 is not recommended on x64. "
+            "Switching quant format to QDQ."
+        )
+        quant_format = QuantFormat.QDQ
+
+    # Safer path for QOperator exports
+    if quant_format == QuantFormat.QOperator and per_channel:
+        print(
+            "[WARN] Disabling per-channel for QOperator export to avoid "
+            "broadcast/requantization issues."
+        )
+        per_channel = False
+
+    return quant_format, activation_type, weight_type, per_channel
 
 def export_quantized_onnx(
     fp32_onnx_path: str,
@@ -402,6 +438,7 @@ def export_quantized_onnx(
     weight_symmetric: bool,
     calib_samples: int,
     provider: str = "CPUExecutionProvider",
+    force_qoperator: bool = False,
 ) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -409,22 +446,24 @@ def export_quantized_onnx(
     if provider == "CUDAExecutionProvider":
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
-    print("[INFO] Creating ORT session for static quantization...")
     sess = ort.InferenceSession(fp32_onnx_path, providers=providers)
-
     input_names = [x.name for x in sess.get_inputs()]
     if len(input_names) != 1:
         raise ValueError(f"Expected exactly 1 ONNX input, got {input_names}")
-
     input_name = input_names[0]
-    print(f"[INFO] Using ONNX input name: {input_name}")
-    print(f"[INFO] Quant format       : {quant_format_name}")
-    print(f"[INFO] Calibration method: {calibration_method_name}")
-    print(f"[INFO] Activation type   : {activation_type_name}")
-    print(f"[INFO] Weight type       : {weight_type_name}")
+
+    quant_format, activation_type, weight_type, per_channel = resolve_quant_config(
+        quant_format_name=quant_format_name,
+        activation_type_name=activation_type_name,
+        weight_type_name=weight_type_name,
+        per_channel=per_channel,
+        force_qoperator=force_qoperator,
+    )
+
+    print(f"[INFO] Quant format       : {quant_format}")
+    print(f"[INFO] Activation type   : {activation_type}")
+    print(f"[INFO] Weight type       : {weight_type}")
     print(f"[INFO] Per-channel       : {per_channel}")
-    print(f"[INFO] Act symmetric     : {activation_symmetric}")
-    print(f"[INFO] Weight symmetric  : {weight_symmetric}")
 
     data_reader = LoaderCalibrationDataReader(
         loader=calib_loader,
@@ -436,9 +475,9 @@ def export_quantized_onnx(
         model_input=fp32_onnx_path,
         model_output=output_path,
         calibration_data_reader=data_reader,
-        quant_format=get_quant_format(quant_format_name),
-        activation_type=get_quant_type(activation_type_name),
-        weight_type=get_quant_type(weight_type_name),
+        quant_format=quant_format,
+        activation_type=activation_type,
+        weight_type=weight_type,
         calibrate_method=get_calibration_method(calibration_method_name),
         per_channel=per_channel,
         extra_options={
@@ -450,17 +489,19 @@ def export_quantized_onnx(
     print(f"[INFO] Saved quantized ONNX to: {output_path}")
 
     quant_stats = collect_onnx_op_counts(output_path)
-    if quant_format_name == "qoperator":
-        if quant_stats.get("QLinearConv", 0) == 0 and quant_stats.get("QLinearMatMul", 0) == 0:
-            print("[WARN] QOperator export produced no QLinearConv/QLinearMatMul.")
-        else:
-            print("[INFO] QOperator export looks valid.")
-    else:
-        if quant_stats.get("QuantizeLinear", 0) == 0 and quant_stats.get("DequantizeLinear", 0) == 0:
-            print("[WARN] QDQ export produced no QuantizeLinear/DequantizeLinear nodes.")
-        else:
-            print("[INFO] QDQ export looks valid.")
+    qlinear_conv = quant_stats.get("QLinearConv", 0)
+    qlinear_matmul = quant_stats.get("QLinearMatMul", 0)
 
+    if qlinear_conv == 0 and qlinear_matmul == 0:
+        raise RuntimeError(
+            "Requested QOperator export, but the output model does not contain "
+            "QLinearConv or QLinearMatMul nodes."
+        )
+
+    print(
+        f"[INFO] Verified QOperator export: "
+        f"QLinearConv={qlinear_conv}, QLinearMatMul={qlinear_matmul}"
+    )
 
 def main(args: argparse.Namespace) -> None:
     if args.batch_size < 1:
@@ -515,6 +556,7 @@ def main(args: argparse.Namespace) -> None:
         quant_input_path = preprocessed_onnx_path
 
     calib_loader = build_calibration_loader(args)
+
     export_quantized_onnx(
         fp32_onnx_path=quant_input_path,
         output_path=quant_onnx_path,
@@ -523,11 +565,12 @@ def main(args: argparse.Namespace) -> None:
         activation_type_name=args.activation_type,
         weight_type_name=args.weight_type,
         calibration_method_name=args.calibration_method,
-        per_channel=per_channel,
+        per_channel=args.per_channel,
         activation_symmetric=args.activation_symmetric,
-        weight_symmetric=weight_symmetric,
-        calib_samples=args.calib_max_samples,
-        provider="CPUExecutionProvider",
+        weight_symmetric=args.weight_symmetric,
+        calib_samples=args.num_calib,
+        provider=args.execution_provider,
+        force_qoperator=args.force_qoperator,
     )
 
     print("[INFO] Done.")
