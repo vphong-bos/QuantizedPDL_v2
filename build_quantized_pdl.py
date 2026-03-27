@@ -9,6 +9,8 @@ import onnx
 import onnxruntime as ort
 import torch
 
+from aimet_torch.batch_norm_fold import fold_all_batch_norms
+
 from onnxruntime.quantization import (
     CalibrationDataReader,
     CalibrationMethod,
@@ -173,6 +175,12 @@ def parse_args() -> argparse.Namespace:
         "--force_qoperator",
         action="store_true",
         help="Force true QOperator export. Internally switches to a QOperator-safe dtype combo if needed.",
+    )
+
+    parser.add_argument(
+        "--run_bn_fold",
+        action="store_true",
+        help="Run AIMET generic batch norm folding before CLE/export.",
     )
 
     return parser.parse_args()
@@ -340,6 +348,33 @@ def maybe_fold_custom_conv_bn(model: torch.nn.Module, enabled: bool) -> None:
         for name in after_names[:50]:
             print(f"  {name}")
         debug_remaining_custom_conv_with_bn(model, max_items=20)
+
+def maybe_fold_all_batch_norms(
+    model: torch.nn.Module,
+    dummy_input: torch.Tensor,
+    enabled: bool,
+) -> torch.nn.Module:
+    if not enabled:
+        return model
+
+    print("[INFO] Running AIMET fold_all_batch_norms...")
+
+    was_training = model.training
+    model.eval()
+
+    try:
+        with torch.no_grad():
+            folded_pairs = fold_all_batch_norms(model, input_shapes=dummy_input.shape)
+
+        num_folded = len(folded_pairs) if folded_pairs is not None else 0
+        print(f"[INFO] AIMET BN fold completed. Folded pairs: {num_folded}")
+    except Exception as e:
+        print(f"[WARN] AIMET BN fold failed and will be skipped: {e}")
+
+    if was_training:
+        model.train()
+
+    return model
 
 
 def maybe_run_cle(model: torch.nn.Module, dummy_input: torch.Tensor, enabled: bool) -> torch.nn.Module:
@@ -582,6 +617,7 @@ def main(args: argparse.Namespace) -> None:
     )
 
     maybe_fold_custom_conv_bn(model, args.enable_custom_conv_bn_fold)
+    model = maybe_fold_all_batch_norms(model, dummy_input, args.run_bn_fold)
     model = maybe_run_cle(model, dummy_input, args.run_cle)
 
     fp32_onnx_path = os.path.join(args.export_path, args.fp32_name)
