@@ -269,14 +269,23 @@ def maybe_fold_custom_conv_bn(model: torch.nn.Module, enabled: bool) -> None:
         debug_remaining_custom_conv_with_bn(model, max_items=20)
 
 
-def maybe_run_cle(model: torch.nn.Module, dummy_input: torch.Tensor, enabled: bool) -> None:
+def maybe_run_cle(model: torch.nn.Module, dummy_input: torch.Tensor, enabled: bool) -> torch.nn.Module:
     if not enabled:
-        return
+        return model
 
     print("[INFO] Running AIMET Cross-Layer Equalization...")
-    equalize_model(model, dummy_input)
-    print("[INFO] Cross-Layer Equalization completed.")
 
+    was_training = model.training
+    model.eval()
+
+    with torch.no_grad():
+        equalize_model(model, dummy_input=dummy_input)
+
+    if was_training:
+        model.train()
+
+    print("[INFO] Cross-Layer Equalization completed.")
+    return model
 
 def export_fp32_onnx(
     model: torch.nn.Module,
@@ -428,7 +437,7 @@ def main(args: argparse.Namespace) -> None:
     )
 
     maybe_fold_custom_conv_bn(model, args.enable_custom_conv_bn_fold)
-    maybe_run_cle(model, dummy_input, args.run_cle)
+    model = maybe_run_cle(model, dummy_input, args.run_cle)
 
     fp32_onnx_path = os.path.join(args.export_path, args.fp32_name)
     quant_onnx_path = os.path.join(args.export_path, args.quant_name)
@@ -452,7 +461,7 @@ def main(args: argparse.Namespace) -> None:
     )
 
     print("[INFO] Done.")
-    
+
 
 if __name__ == "__main__":
     main(parse_args())
