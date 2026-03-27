@@ -14,6 +14,7 @@ from onnxruntime.quantization import (
     CalibrationMethod,
     QuantFormat,
     QuantType,
+    quant_pre_process,
     quantize_static,
 )
 
@@ -62,6 +63,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--export_path", type=str, default="quantized_export")
     parser.add_argument("--fp32_name", type=str, default="model_fp32.onnx")
+    parser.add_argument(
+        "--preprocessed_name",
+        type=str,
+        default="model_fp32_preprocessed.onnx",
+        help="Intermediate ONNX after ONNX Runtime quantization preprocessing.",
+    )
     parser.add_argument("--quant_name", type=str, default="model_int8.onnx")
     parser.add_argument(
         "--quant_format",
@@ -82,6 +89,27 @@ def parse_args() -> argparse.Namespace:
         "--run_cle",
         action="store_true",
         help="Run AIMET cross-layer equalization before ONNX export.",
+    )
+
+    parser.add_argument(
+        "--skip_onnx_preprocess",
+        action="store_true",
+        help="Skip ONNX Runtime quantization pre-processing step.",
+    )
+    parser.add_argument(
+        "--skip_preprocess_optimization",
+        action="store_true",
+        help="Disable ONNX Runtime graph optimization during quantization pre-processing.",
+    )
+    parser.add_argument(
+        "--skip_symbolic_shape_inference",
+        action="store_true",
+        help="Disable symbolic shape inference during quantization pre-processing.",
+    )
+    parser.add_argument(
+        "--disable_auto_merge",
+        action="store_true",
+        help="Disable auto_merge in ONNX Runtime quantization pre-processing.",
     )
 
     parser.add_argument(
@@ -287,6 +315,7 @@ def maybe_run_cle(model: torch.nn.Module, dummy_input: torch.Tensor, enabled: bo
     print("[INFO] Cross-Layer Equalization completed.")
     return model
 
+
 def export_fp32_onnx(
     model: torch.nn.Module,
     dummy_input: torch.Tensor,
@@ -311,6 +340,33 @@ def export_fp32_onnx(
             "Exported FP32 ONNX still contains QuantizeLinear/DequantizeLinear. "
             "This is not a plain FP32 ONNX."
         )
+
+
+def run_onnx_preprocessing(
+    input_onnx_path: str,
+    output_onnx_path: str,
+    skip_optimization: bool = False,
+    skip_symbolic_shape: bool = False,
+    auto_merge: bool = True,
+) -> None:
+    os.makedirs(os.path.dirname(output_onnx_path), exist_ok=True)
+    print("[INFO] Running ONNX Runtime quantization pre-processing...")
+    print(f"[INFO]   Input model : {input_onnx_path}")
+    print(f"[INFO]   Output model: {output_onnx_path}")
+    print(f"[INFO]   skip_optimization   : {skip_optimization}")
+    print(f"[INFO]   skip_symbolic_shape : {skip_symbolic_shape}")
+    print(f"[INFO]   auto_merge          : {auto_merge}")
+
+    quant_pre_process(
+        input_model_path=input_onnx_path,
+        output_model_path=output_onnx_path,
+        skip_optimization=skip_optimization,
+        skip_symbolic_shape=skip_symbolic_shape,
+        auto_merge=auto_merge,
+    )
+
+    print("[INFO] ONNX Runtime quantization pre-processing completed.")
+    collect_onnx_op_counts(output_onnx_path)
 
 
 def build_calibration_loader(args: argparse.Namespace):
@@ -440,13 +496,27 @@ def main(args: argparse.Namespace) -> None:
     model = maybe_run_cle(model, dummy_input, args.run_cle)
 
     fp32_onnx_path = os.path.join(args.export_path, args.fp32_name)
+    preprocessed_onnx_path = os.path.join(args.export_path, args.preprocessed_name)
     quant_onnx_path = os.path.join(args.export_path, args.quant_name)
 
     export_fp32_onnx(model, dummy_input, fp32_onnx_path)
 
+    quant_input_path = fp32_onnx_path
+    if args.skip_onnx_preprocess:
+        print("[INFO] Skipping ONNX Runtime quantization pre-processing.")
+    else:
+        run_onnx_preprocessing(
+            input_onnx_path=fp32_onnx_path,
+            output_onnx_path=preprocessed_onnx_path,
+            skip_optimization=args.skip_preprocess_optimization,
+            skip_symbolic_shape=args.skip_symbolic_shape_inference,
+            auto_merge=not args.disable_auto_merge,
+        )
+        quant_input_path = preprocessed_onnx_path
+
     calib_loader = build_calibration_loader(args)
     export_quantized_onnx(
-        fp32_onnx_path=fp32_onnx_path,
+        fp32_onnx_path=quant_input_path,
         output_path=quant_onnx_path,
         calib_loader=calib_loader,
         quant_format_name=args.quant_format,
