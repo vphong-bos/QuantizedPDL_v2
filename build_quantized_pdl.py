@@ -569,7 +569,7 @@ def main(args: argparse.Namespace) -> None:
         activation_symmetric=args.activation_symmetric,
         weight_symmetric=args.weight_symmetric,
         calib_samples=args.num_calib,
-        provider=args.execution_provider,
+        provider="CPUExecutionProvider",
         force_qoperator=args.force_qoperator,
     )
 
