@@ -10,6 +10,7 @@ import onnxruntime as ort
 import torch
 
 from aimet_torch.batch_norm_fold import fold_all_batch_norms
+from aimet_torch.seq_mse import apply_seq_mse, SeqMseParams
 
 from onnxruntime.quantization import (
     CalibrationDataReader,
@@ -221,7 +222,51 @@ def parse_args() -> argparse.Namespace:
         help="Run AIMET generic batch norm folding before CLE/export.",
     )
 
+    parser.add_argument(
+        "--run_seq_mse",
+        action="store_true",
+        help="Run AIMET SeqMSE before ONNX export.",
+    )
+
+    parser.add_argument(
+        "--seq_mse_num_batches",
+        type=int,
+        default=4,
+        help="Number of calibration batches to use for SeqMSE.",
+    )
+
     return parser.parse_args()
+
+def run_seq_mse_forward_pass(model: torch.nn.Module, data_loader, max_batches: int) -> None:
+    was_training = model.training
+    model.eval()
+
+    device = next(model.parameters()).device
+    num_batches = 0
+
+    with torch.no_grad():
+        for batch in data_loader:
+            image = find_first_numeric_tensor(batch)
+            if image is None:
+                raise ValueError(
+                    f"Could not find numeric tensor in SeqMSE batch type: {type(batch)}"
+                )
+
+            if isinstance(image, np.ndarray):
+                image = torch.from_numpy(image)
+
+            image = image.to(device)
+            if image.ndim == 3:
+                image = image.unsqueeze(0)
+
+            _ = model(image)
+
+            num_batches += 1
+            if num_batches >= max_batches:
+                break
+
+    if was_training:
+        model.train()
 
 
 def set_random_seed(seed: int) -> None:
@@ -439,6 +484,60 @@ def maybe_run_cle(model: torch.nn.Module, dummy_input: torch.Tensor, enabled: bo
         model.train()
 
     print("[INFO] Cross-Layer Equalization completed.")
+    return model
+
+def maybe_run_seq_mse(
+    model: torch.nn.Module,
+    dummy_input: torch.Tensor,
+    calib_loader,
+    enabled: bool,
+    num_batches: int,
+) -> torch.nn.Module:
+    if not enabled:
+        return model
+
+    print("[INFO] Running AIMET SeqMSE...")
+
+    was_training = model.training
+    model.eval()
+
+    try:
+        params = SeqMseParams(num_batches=num_batches)
+
+        with torch.no_grad():
+            apply_seq_mse(
+                model=model,
+                dummy_input=dummy_input,
+                data_loader=calib_loader,
+                params=params,
+                forward_fn=run_seq_mse_forward_pass,
+            )
+
+        print("[INFO] SeqMSE completed.")
+
+    except TypeError:
+        # Fallback for AIMET variants with slightly different signatures
+        try:
+            params = SeqMseParams(num_batches=num_batches)
+
+            with torch.no_grad():
+                apply_seq_mse(
+                    model,
+                    dummy_input,
+                    calib_loader,
+                    params,
+                )
+
+            print("[INFO] SeqMSE completed.")
+        except Exception as e:
+            print(f"[WARN] SeqMSE failed and will be skipped: {e}")
+
+    except Exception as e:
+        print(f"[WARN] SeqMSE failed and will be skipped: {e}")
+
+    if was_training:
+        model.train()
+
     return model
 
 
@@ -663,6 +762,16 @@ def main(args: argparse.Namespace) -> None:
     maybe_fold_custom_conv_bn(model, args.enable_custom_conv_bn_fold)
     model = maybe_fold_all_batch_norms(model, dummy_input, args.run_bn_fold)
     model = maybe_run_cle(model, dummy_input, args.run_cle)
+
+    calib_loader = build_calibration_loader(args)
+
+    model = maybe_run_seq_mse(
+        model=model,
+        dummy_input=dummy_input,
+        calib_loader=calib_loader,
+        enabled=args.run_seq_mse,
+        num_batches=args.seq_mse_num_batches,
+    )
 
     fp32_onnx_path = os.path.join(args.export_path, args.fp32_name)
     preprocessed_onnx_path = os.path.join(args.export_path, args.preprocessed_name)
