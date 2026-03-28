@@ -235,6 +235,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of calibration batches to use for SeqMSE.",
     )
 
+    parser.add_argument(
+        "--calibrate_per_node",
+        action="store_true",
+        help="Run calibrate per node to reduce memory usage",
+    )
+
     return parser.parse_args()
 
 def run_seq_mse_forward_pass(model: torch.nn.Module, data_loader, max_batches: int) -> None:
@@ -665,6 +671,7 @@ def export_quantized_onnx(
     calib_samples: int,
     provider: str = "CPUExecutionProvider",
     force_qoperator: bool = False,
+    calibrate_per_node: bool = False,
 ) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -710,6 +717,7 @@ def export_quantized_onnx(
             "ActivationSymmetric": activation_symmetric,
             "WeightSymmetric": weight_symmetric,
         },
+        calibrate_per_node=calibrate_per_node
     )
 
     print(f"[INFO] Saved quantized ONNX to: {output_path}")
@@ -808,6 +816,7 @@ def main(args: argparse.Namespace) -> None:
         calib_samples=args.num_calib,
         provider="CPUExecutionProvider",
         force_qoperator=args.force_qoperator,
+        calibrate_per_node = args.calibrate_per_node
     )
 
     print("[INFO] Done.")
