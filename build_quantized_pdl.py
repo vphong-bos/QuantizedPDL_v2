@@ -465,14 +465,6 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--exclude_ops",
-        type=str,
-        nargs="*",
-        default=[],
-        help="ONNX op types to exclude from quantization, e.g. Conv Add Mul.",
-    )
-
-    parser.add_argument(
         "--exclude_nodes_file",
         type=str,
         default="",
@@ -917,7 +909,6 @@ def export_quantized_onnx(
     provider: str = "CPUExecutionProvider",
     force_qoperator: bool = False,
     nodes_to_exclude: Optional[list[str]] = None,
-    op_types_to_exclude: Optional[list[str]] = None,
 ) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -951,17 +942,11 @@ def export_quantized_onnx(
     )
 
     nodes_to_exclude = nodes_to_exclude or []
-    op_types_to_exclude = op_types_to_exclude or []
 
     if nodes_to_exclude:
         print("[INFO] Excluding ONNX nodes from quantization:")
         for name in nodes_to_exclude:
             print(f"  - {name}")
-
-    if op_types_to_exclude:
-        print("[INFO] Excluding ONNX op types from quantization:")
-        for op_name in op_types_to_exclude:
-            print(f"  - {op_name}")
 
     quantize_static(
         model_input=fp32_onnx_path,
@@ -973,7 +958,6 @@ def export_quantized_onnx(
         calibrate_method=get_calibration_method(calibration_method_name),
         per_channel=per_channel,
         nodes_to_exclude=nodes_to_exclude,
-        op_types_to_exclude=op_types_to_exclude,
         extra_options={
             "ActivationSymmetric": activation_symmetric,
             "WeightSymmetric": weight_symmetric,
@@ -1082,10 +1066,9 @@ def main(args: argparse.Namespace) -> None:
     seen = set()
     nodes_to_exclude = [n for n in nodes_to_exclude if not (n in seen or seen.add(n))]
 
-    if nodes_to_exclude or args.exclude_ops:
+    if nodes_to_exclude:
         print("[INFO] Final selective quantization config:")
         print(f"[INFO]   excluded nodes: {nodes_to_exclude}")
-        print(f"[INFO]   excluded ops  : {args.exclude_ops}")
 
     export_quantized_onnx(
         fp32_onnx_path=quant_input_path,
@@ -1102,7 +1085,6 @@ def main(args: argparse.Namespace) -> None:
         provider="CPUExecutionProvider",
         force_qoperator=args.force_qoperator,
         nodes_to_exclude=nodes_to_exclude,
-        op_types_to_exclude=args.exclude_ops,
     )
 
     print("[INFO] Done.")
