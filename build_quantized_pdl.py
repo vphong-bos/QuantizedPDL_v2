@@ -272,6 +272,69 @@ class TraceOnlyTensorOutputWrapper(torch.nn.Module):
 
         raise RuntimeError(f"Unsupported output type for tracing: {type(out)}")
 
+def load_excluded_node_names(path: str) -> list[str]:
+    if not path:
+        return []
+
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"exclude_nodes_file not found: {path}")
+
+    names = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            names.append(line)
+    return names
+
+
+def get_last_conv_node_names(model_path: str, count: int) -> list[str]:
+    if count <= 0:
+        return []
+
+    model = onnx.load(model_path)
+    conv_nodes = [node for node in model.graph.node if node.op_type == "Conv"]
+
+    selected = conv_nodes[-count:] if count < len(conv_nodes) else conv_nodes
+
+    names = []
+    unnamed_idx = 0
+    for node in selected:
+        if node.name:
+            names.append(node.name)
+        else:
+            # Fallback for unnamed nodes
+            fallback_name = f"__unnamed_conv_{unnamed_idx}"
+            unnamed_idx += 1
+            print(
+                f"[WARN] Found Conv node without name. "
+                f"Cannot exclude it reliably by name: outputs={list(node.output)}"
+            )
+
+    return names
+
+
+def summarize_onnx_nodes(model_path: str, op_types: Optional[set[str]] = None, limit: int = 200) -> None:
+    model = onnx.load(model_path)
+
+    print(f"[INFO] ONNX node summary for: {model_path}")
+    shown = 0
+    for idx, node in enumerate(model.graph.node):
+        if op_types is not None and node.op_type not in op_types:
+            continue
+
+        print(
+            f"[{idx:04d}] op={node.op_type:<12} "
+            f"name={node.name!r} "
+            f"inputs={list(node.input)} "
+            f"outputs={list(node.output)}"
+        )
+        shown += 1
+        if shown >= limit:
+            print(f"[INFO] Reached display limit={limit}")
+            break
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Export FP32 ONNX and quantized ONNX with improved PTQ preprocessing."
@@ -391,6 +454,36 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4,
         help="Number of calibration batches to use for SeqMSE.",
+    )
+
+    parser.add_argument(
+        "--exclude_nodes",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Exact ONNX node names to exclude from quantization.",
+    )
+
+    parser.add_argument(
+        "--exclude_ops",
+        type=str,
+        nargs="*",
+        default=[],
+        help="ONNX op types to exclude from quantization, e.g. Conv Add Mul.",
+    )
+
+    parser.add_argument(
+        "--exclude_nodes_file",
+        type=str,
+        default="",
+        help="Optional text file containing ONNX node names to exclude, one per line.",
+    )
+
+    parser.add_argument(
+        "--auto_exclude_last_conv_count",
+        type=int,
+        default=0,
+        help="Automatically exclude the last N Conv nodes in the ONNX graph.",
     )
 
     return parser.parse_args()
@@ -823,7 +916,8 @@ def export_quantized_onnx(
     calib_samples: int,
     provider: str = "CPUExecutionProvider",
     force_qoperator: bool = False,
-    calibrate_per_node: bool = False,
+    nodes_to_exclude: Optional[list[str]] = None,
+    op_types_to_exclude: Optional[list[str]] = None,
 ) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -856,6 +950,19 @@ def export_quantized_onnx(
         max_samples=calib_samples,
     )
 
+    nodes_to_exclude = nodes_to_exclude or []
+    op_types_to_exclude = op_types_to_exclude or []
+
+    if nodes_to_exclude:
+        print("[INFO] Excluding ONNX nodes from quantization:")
+        for name in nodes_to_exclude:
+            print(f"  - {name}")
+
+    if op_types_to_exclude:
+        print("[INFO] Excluding ONNX op types from quantization:")
+        for op_name in op_types_to_exclude:
+            print(f"  - {op_name}")
+
     quantize_static(
         model_input=fp32_onnx_path,
         model_output=output_path,
@@ -865,6 +972,8 @@ def export_quantized_onnx(
         weight_type=weight_type,
         calibrate_method=get_calibration_method(calibration_method_name),
         per_channel=per_channel,
+        nodes_to_exclude=nodes_to_exclude,
+        op_types_to_exclude=op_types_to_exclude,
         extra_options={
             "ActivationSymmetric": activation_symmetric,
             "WeightSymmetric": weight_symmetric,
