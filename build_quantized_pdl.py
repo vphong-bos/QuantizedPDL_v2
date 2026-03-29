@@ -35,6 +35,164 @@ from utils.image_loader import load_images
 
 from aimet_torch.cross_layer_equalization import equalize_model
 
+from collections import defaultdict
+
+def should_track_module(name: str, module: torch.nn.Module) -> bool:
+    track_types = (
+        torch.nn.Conv2d,
+        torch.nn.BatchNorm2d,
+        torch.nn.ReLU,
+        torch.nn.ReLU6,
+        torch.nn.SiLU,
+        torch.nn.Hardswish,
+    )
+    return isinstance(module, track_types)
+
+def tensor_stat_dict(x: torch.Tensor) -> Dict[str, float]:
+    x = x.detach().float().cpu()
+    if x.numel() == 0:
+        return {}
+
+    x_flat = x.reshape(-1)
+    x_min = float(x_flat.min().item())
+    x_max = float(x_flat.max().item())
+    absmax = max(abs(x_min), abs(x_max))
+    neg_ratio = float((x_flat < 0).float().mean().item())
+    zero_ratio = float((x_flat == 0).float().mean().item())
+
+    # 8-bit scales
+    # Symmetric int8 usually uses absmax / 127
+    sym_scale = absmax / 127.0 if absmax > 0 else 1.0
+
+    # Asymmetric uint8 usually uses (max-min) / 255
+    asym_range = x_max - x_min
+    asym_scale = asym_range / 255.0 if asym_range > 0 else 1.0
+
+    # Rough measure: how much of symmetric range is unused
+    used_fraction_in_sym = (x_max - x_min) / (2.0 * absmax) if absmax > 0 else 1.0
+    wasted_fraction_in_sym = 1.0 - used_fraction_in_sym
+
+    return {
+        "min": x_min,
+        "max": x_max,
+        "absmax": absmax,
+        "neg_ratio": neg_ratio,
+        "zero_ratio": zero_ratio,
+        "sym_scale": sym_scale,
+        "asym_scale": asym_scale,
+        "sym_over_asym_scale": sym_scale / asym_scale if asym_scale > 0 else float("inf"),
+        "used_fraction_in_sym": used_fraction_in_sym,
+        "wasted_fraction_in_sym": wasted_fraction_in_sym,
+    }
+
+def collect_activation_stats(
+    model: torch.nn.Module,
+    data_loader,
+    max_batches: int = 8,
+) -> Dict[str, Dict[str, float]]:
+    device = next(model.parameters()).device
+    stats_accum = defaultdict(list)
+    hooks = []
+
+    def make_hook(name: str):
+        def hook(module, inputs, output):
+            tensor = None
+
+            if torch.is_tensor(output):
+                tensor = output
+            elif isinstance(output, (tuple, list)):
+                for v in output:
+                    if torch.is_tensor(v):
+                        tensor = v
+                        break
+            elif isinstance(output, dict):
+                for v in output.values():
+                    if torch.is_tensor(v):
+                        tensor = v
+                        break
+
+            if tensor is None:
+                return
+
+            s = tensor_stat_dict(tensor)
+            if s:
+                stats_accum[name].append(s)
+        return hook
+
+    for name, module in model.named_modules():
+        if should_track_module(name, module):
+            hooks.append(module.register_forward_hook(make_hook(name)))
+
+    was_training = model.training
+    model.eval()
+
+    with torch.no_grad():
+        batch_count = 0
+        for batch in data_loader:
+            image = find_first_numeric_tensor(batch)
+            if image is None:
+                raise ValueError(f"Could not find numeric tensor in batch type: {type(batch)}")
+
+            if isinstance(image, np.ndarray):
+                image = torch.from_numpy(image)
+
+            image = image.to(device)
+            if image.ndim == 3:
+                image = image.unsqueeze(0)
+
+            _ = model(image)
+            batch_count += 1
+            if batch_count >= max_batches:
+                break
+
+    if was_training:
+        model.train()
+
+    for h in hooks:
+        h.remove()
+
+    summary = {}
+    for name, items in stats_accum.items():
+        if not items:
+            continue
+
+        merged = {}
+        for key in items[0].keys():
+            merged[key] = float(np.mean([x[key] for x in items]))
+        summary[name] = merged
+
+    return summary
+
+def print_top_activation_problems(stats: Dict[str, Dict[str, float]], top_k: int = 25) -> None:
+    rows = []
+    for name, s in stats.items():
+        rows.append((
+            name,
+            s["wasted_fraction_in_sym"],
+            s["sym_over_asym_scale"],
+            s["neg_ratio"],
+            s["zero_ratio"],
+            s["min"],
+            s["max"],
+        ))
+
+    # Sort by most likely to hate symmetric activation quantization
+    rows.sort(key=lambda x: (x[1], x[2]), reverse=True)
+
+    print("\n[INFO] Top activation tensors likely to be hurt by symmetric quantization:")
+    print(
+        f"{'name':60s} {'wasted_sym':>12s} {'sym/asym':>10s} "
+        f"{'neg%':>8s} {'zero%':>8s} {'min':>12s} {'max':>12s}"
+    )
+    for row in rows[:top_k]:
+        name, wasted_sym, sym_over_asym, neg_ratio, zero_ratio, x_min, x_max = row
+        print(
+            f"{name[:60]:60s} "
+            f"{wasted_sym:12.4f} {sym_over_asym:10.4f} "
+            f"{100.0*neg_ratio:8.2f} {100.0*zero_ratio:8.2f} "
+            f"{x_min:12.5f} {x_max:12.5f}"
+        )
+
 class CleTraceWrapper(torch.nn.Module):
     def __init__(self, model: torch.nn.Module):
         super().__init__()
@@ -766,6 +924,10 @@ def main(args: argparse.Namespace) -> None:
 
     calib_loader = build_calibration_loader(args)
 
+    print("[INFO] Collecting activation statistics on calibration data...")
+    act_stats = collect_activation_stats(model, calib_loader, max_batches=8)
+    print_top_activation_problems(act_stats, top_k=30)
+    
     model = maybe_run_seq_mse(
         model=model,
         dummy_input=dummy_input,
