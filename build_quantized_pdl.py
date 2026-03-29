@@ -1066,6 +1066,27 @@ def main(args: argparse.Namespace) -> None:
 
     calib_loader = build_calibration_loader(args)
 
+    file_excluded_nodes = load_excluded_node_names(args.exclude_nodes_file)
+
+    auto_excluded_nodes = get_last_conv_node_names(
+        quant_input_path,
+        args.auto_exclude_last_conv_count,
+    )
+
+    nodes_to_exclude = []
+    nodes_to_exclude.extend(args.exclude_nodes)
+    nodes_to_exclude.extend(file_excluded_nodes)
+    nodes_to_exclude.extend(auto_excluded_nodes)
+
+    # Deduplicate but preserve order
+    seen = set()
+    nodes_to_exclude = [n for n in nodes_to_exclude if not (n in seen or seen.add(n))]
+
+    if nodes_to_exclude or args.exclude_ops:
+        print("[INFO] Final selective quantization config:")
+        print(f"[INFO]   excluded nodes: {nodes_to_exclude}")
+        print(f"[INFO]   excluded ops  : {args.exclude_ops}")
+
     export_quantized_onnx(
         fp32_onnx_path=quant_input_path,
         output_path=quant_onnx_path,
@@ -1079,7 +1100,9 @@ def main(args: argparse.Namespace) -> None:
         weight_symmetric=weight_symmetric,
         calib_samples=args.num_calib,
         provider="CPUExecutionProvider",
-        force_qoperator=args.force_qoperator
+        force_qoperator=args.force_qoperator,
+        nodes_to_exclude=nodes_to_exclude,
+        op_types_to_exclude=args.exclude_ops,
     )
 
     print("[INFO] Done.")
