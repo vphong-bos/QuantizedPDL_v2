@@ -927,7 +927,7 @@ def main(args: argparse.Namespace) -> None:
     print("[INFO] Collecting activation statistics on calibration data...")
     act_stats = collect_activation_stats(model, calib_loader, max_batches=8)
     print_top_activation_problems(act_stats, top_k=30)
-    
+
     model = maybe_run_seq_mse(
         model=model,
         dummy_input=dummy_input,
@@ -965,9 +965,9 @@ def main(args: argparse.Namespace) -> None:
         activation_type_name=args.activation_type,
         weight_type_name=args.weight_type,
         calibration_method_name=args.calibration_method,
-        per_channel=args.per_channel,
+        per_channel=per_channel,
         activation_symmetric=args.activation_symmetric,
-        weight_symmetric=args.weight_symmetric,
+        weight_symmetric=weight_symmetric,
         calib_samples=args.num_calib,
         provider="CPUExecutionProvider",
         force_qoperator=args.force_qoperator
