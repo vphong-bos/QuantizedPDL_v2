@@ -445,8 +445,8 @@ def main(args):
     }
 
     excluded_modules = [
-        "model.instance_head.offset_predictor.Conv",
-        "model.instance_head.Resize",
+        # "model.instance_head.offset_predictor.Conv",
+        # "model.instance_head.Resize",
     ]
     for name, module in wrapped_model.named_modules():
         if name in EXCLUDE_LAYERS:
