@@ -21,7 +21,9 @@ from aimet_torch.cross_layer_equalization import equalize_model
 from onnxruntime.quantization import quant_pre_process
 from onnx_neural_compressor import data_reader
 from onnx_neural_compressor.quantization import config, quantize
-from onnx_neural_compressor.quantization.config import QuantFormat, QuantType
+
+QuantFormat = config.QuantFormat
+QuantType = config.QuantType
 
 from model.pdl import build_model
 from quantization.calibration_dataset import (
