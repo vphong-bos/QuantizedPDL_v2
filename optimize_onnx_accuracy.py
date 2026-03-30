@@ -275,7 +275,7 @@ def compare_model_outputs(
     orig_sess = make_session_from_model_path(
         original_model_path,
         provider=provider,
-        enable_all_optimizations=enable_all_optimizations,
+        enable_all_optimizations=False,
     )
     opt_sess = make_session_from_model_path(
         optimized_model_path,
