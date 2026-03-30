@@ -21,6 +21,7 @@ from aimet_torch.cross_layer_equalization import equalize_model
 from onnxruntime.quantization import quant_pre_process
 from onnx_neural_compressor import data_reader
 from onnx_neural_compressor.quantization import config, quantize
+from onnxruntime.quantization import QuantFormat, QuantType
 
 QuantFormat = config.QuantFormat
 QuantType = config.QuantType
@@ -597,6 +598,7 @@ class INCExcludeOutputQuantConfig(config.StaticQuantConfig):
         op_types_to_quantize: Optional[list[str]] = None,
         per_channel: bool = True,
         execution_provider: str = "CPUExecutionProvider",
+        reduce_range: bool = True,
     ):
         super().__init__(
             calibration_data_reader=calibration_data_reader,
@@ -605,6 +607,7 @@ class INCExcludeOutputQuantConfig(config.StaticQuantConfig):
             weight_type=QuantType.QInt8,
             execution_provider=execution_provider,
             per_channel=per_channel,
+            reduce_range=reduce_range,
             op_types_to_quantize=op_types_to_quantize or ["Conv", "MatMul", "Add", "Mul"],
             nodes_to_exclude=nodes_to_exclude or [],
         )
@@ -1051,17 +1054,19 @@ def export_quantized_onnx_with_inc(
         op_types_to_quantize=op_types_to_quantize,
         per_channel=per_channel,
         execution_provider="CPUExecutionProvider",
+        reduce_range=True,
     )
 
     print("[INFO] INC quantization config summary:")
-    print("[INFO]   quant_format      : QOperator")
-    print("[INFO]   activation_type   : QInt8")
-    print("[INFO]   weight_type       : QInt8")
+    print(f"[INFO]   quant_format      : {QuantFormat.QOperator}")
+    print(f"[INFO]   activation_type   : {QuantType.QInt8}")
+    print(f"[INFO]   weight_type       : {QuantType.QInt8}")
     print("[INFO]   activation_sym    : True")
     print("[INFO]   weight_sym        : True")
+    print("[INFO]   reduce_range      : True")
     print(f"[INFO]   per_channel       : {per_channel}")
     print(f"[INFO]   op_types_to_quant : {op_types_to_quantize}")
-
+    
     qmodel = quantize(
         model_input=fp32_onnx_path,
         quant_config=cfg,
