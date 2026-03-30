@@ -349,23 +349,27 @@ def collect_real_tensor_names(model: onnx.ModelProto) -> List[str]:
     return ordered
 
 
-def _has_tensor_elem_type(value_info: onnx.ValueInfoProto) -> bool:
+def _is_float_tensor_type(value_info: onnx.ValueInfoProto) -> bool:
     if not value_info.type.HasField("tensor_type"):
         return False
-    tensor_type = value_info.type.tensor_type
-    return tensor_type.elem_type != onnx.TensorProto.UNDEFINED
+    elem_type = value_info.type.tensor_type.elem_type
+    return elem_type in (
+        onnx.TensorProto.FLOAT,
+        onnx.TensorProto.FLOAT16,
+        onnx.TensorProto.DOUBLE,
+    )
 
 
-def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelProto:
+def add_all_intermediate_float_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelProto:
     model = copy.deepcopy(model)
 
     try:
         model = shape_inference.infer_shapes(model)
     except Exception as e:
-        print(f"[WARN] shape_inference.infer_shapes failed: {e}")
+        print(f"[WARN] shape inference failed: {e}")
 
-    names = collect_real_tensor_names(model)
-    existing_output_names = set(o.name for o in model.graph.output)
+    existing_output_names = {o.name for o in model.graph.output}
+    initializer_names = {i.name for i in model.graph.initializer}
 
     known_value_infos = {}
     for vi in model.graph.value_info:
@@ -375,33 +379,29 @@ def add_all_intermediate_outputs_to_model(model: onnx.ModelProto) -> onnx.ModelP
     for vi in model.graph.output:
         known_value_infos[vi.name] = vi
 
-    skipped_unknown_type = []
+    added = 0
+    skipped = 0
 
-    for name in names:
-        if name in existing_output_names:
-            continue
+    for node in model.graph.node:
+        for out_name in node.output:
+            if not out_name:
+                continue
+            if out_name in existing_output_names:
+                continue
+            if out_name in initializer_names:
+                continue
 
-        vi = known_value_infos.get(name)
-        if vi is None:
-            skipped_unknown_type.append(name)
-            continue
+            vi = known_value_infos.get(out_name)
+            if vi is None or not _is_float_tensor_type(vi):
+                skipped += 1
+                continue
 
-        if not _has_tensor_elem_type(vi):
-            skipped_unknown_type.append(name)
-            continue
+            model.graph.output.append(copy.deepcopy(vi))
+            existing_output_names.add(out_name)
+            added += 1
 
-        model.graph.output.append(copy.deepcopy(vi))
-
-    if skipped_unknown_type:
-        print(
-            f"[WARN] Skipped {len(skipped_unknown_type)} tensors with unknown type "
-            f"when adding debug outputs."
-        )
-        for name in skipped_unknown_type[:20]:
-            print(f"  [WARN] unknown type: {name}")
-
+    print(f"[INFO] Added {added} float intermediate outputs, skipped {skipped} non-float/unknown outputs")
     return model
-
 
 def run_all_outputs(
     model_path: str,
@@ -409,7 +409,7 @@ def run_all_outputs(
     provider: str = "CPUExecutionProvider",
 ):
     model = onnx.load(model_path)
-    model_with_all_outputs = add_all_intermediate_outputs_to_model(model)
+    model_with_all_outputs = add_all_intermediate_float_outputs_to_model(model)
 
     try:
         sess = make_session_from_onnx_model(
