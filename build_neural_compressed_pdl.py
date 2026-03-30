@@ -21,6 +21,7 @@ from aimet_torch.cross_layer_equalization import equalize_model
 from onnxruntime.quantization import quant_pre_process
 from onnx_neural_compressor import data_reader
 from onnx_neural_compressor.quantization import config, quantize
+from onnx_neural_compressor.quantization.config import QuantFormat, QuantType
 
 from model.pdl import build_model
 from quantization.calibration_dataset import (
@@ -593,17 +594,18 @@ class INCExcludeOutputQuantConfig(config.StaticQuantConfig):
         nodes_to_exclude: Optional[list[str]] = None,
         op_types_to_quantize: Optional[list[str]] = None,
         per_channel: bool = True,
+        execution_provider: str = "CPUExecutionProvider",
     ):
         super().__init__(
             calibration_data_reader=calibration_data_reader,
-            quant_format="QOperator",
-            activation_type="QInt8",
-            weight_type="QInt8",
+            quant_format=QuantFormat.QOperator,
+            activation_type=QuantType.QInt8,
+            weight_type=QuantType.QInt8,
+            execution_provider=execution_provider,
             per_channel=per_channel,
             op_types_to_quantize=op_types_to_quantize or ["Conv", "MatMul", "Add", "Mul"],
             nodes_to_exclude=nodes_to_exclude or [],
         )
-
 
 
 def collect_onnx_op_counts(model_path: str) -> Dict[str, int]:
@@ -1046,6 +1048,7 @@ def export_quantized_onnx_with_inc(
         nodes_to_exclude=nodes_to_exclude,
         op_types_to_quantize=op_types_to_quantize,
         per_channel=per_channel,
+        execution_provider="CPUExecutionProvider",
     )
 
     print("[INFO] INC quantization config summary:")
