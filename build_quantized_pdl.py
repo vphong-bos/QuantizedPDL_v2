@@ -40,9 +40,6 @@ from utils.image_loader import load_images
 
 from aimet_torch.cross_layer_equalization import equalize_model
 
-from aimet_torch.v2.nn import QuantizationMixin
-from model.conv2d import Conv2d
-
 from collections import defaultdict
 
 def should_track_module(name: str, module: torch.nn.Module) -> bool:
@@ -55,31 +52,6 @@ def should_track_module(name: str, module: torch.nn.Module) -> bool:
         torch.nn.Hardswish,
     )
     return isinstance(module, track_types)
-
-@QuantizationMixin.implements(Conv2d)
-class QuantizedConv2d(QuantizationMixin, Conv2d):
-    def __quant_init__(self):
-        super().__quant_init__()
-
-        # Declare the number of input/output quantizers
-        self.input_quantizers = torch.nn.ModuleList([None])
-        self.output_quantizers = torch.nn.ModuleList(
-            # <TODO: Declare the number of output quantizers here>
-        )
-
-    def forward(self, x: 'torch.Tensor') -> 'torch.Tensor':
-        # Quantize input tensors
-        if self.input_quantizers[0]:
-            x = self.input_quantizers[0](x)
-
-        # Run forward with quantized inputs and parameters
-        with self._patch_quantized_parameters():
-            ret = super().forward(x)
-
-        # Quantize output tensors
-        # <TODO: Quantize `ret` as necessary>
-
-        return ret
 
 def tensor_stat_dict(x: torch.Tensor) -> Dict[str, float]:
     x = x.detach().float().cpu()
@@ -493,7 +465,7 @@ def parse_args() -> argparse.Namespace:
         "--execution_provider",
         type=str,
         default="val",
-        choices=["CPUExecutionProvider", "CUDAExecutionProvider"],
+        choices=["CPUExecutionProvider", "CPUExecutionProvider"],
         help="Evaluation split for QuantAnalyzer.",
     )
 
@@ -953,10 +925,8 @@ def maybe_run_quant_analyzer(
         ),
     )
 
-    trace_safe_model = TraceOnlyTensorOutputWrapper(model).to(device).eval()
-
     analyzer = QuantAnalyzer(
-        model=trace_safe_model,
+        model=model,
         dummy_input=dummy_input,
         forward_pass_callback=forward_pass_callback,
         eval_callback=eval_callback,
