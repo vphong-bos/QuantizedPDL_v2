@@ -9,6 +9,11 @@ import onnx
 import onnxruntime as ort
 import torch
 
+from aimet_common.utils import CallbackFunc
+from aimet_torch.quant_analyzer import QuantAnalyzer
+from evaluation.eval_dataset import build_eval_loader
+from evaluation.eval_metrics import evaluate_model
+
 from aimet_torch.batch_norm_fold import fold_all_batch_norms
 from aimet_torch.seq_mse import apply_seq_mse, SeqMseParams
 
@@ -478,7 +483,89 @@ def parse_args() -> argparse.Namespace:
         help="Automatically exclude the last N Conv nodes in the ONNX graph.",
     )
 
+    parser.add_argument(
+        "--run_quant_analyzer",
+        action="store_true",
+        help="Run AIMET QuantAnalyzer before ONNX export.",
+    )
+
+    parser.add_argument(
+        "--quant_analyzer_dir",
+        type=str,
+        default="quant_analyzer_results",
+        help="Directory to save QuantAnalyzer outputs.",
+    )
+
+    parser.add_argument(
+        "--analyzer_num_batches",
+        type=int,
+        default=None,
+        help="Number of calibration batches for analyzer forward pass; default uses all.",
+    )
+
+    parser.add_argument(
+        "--cityscapes_root",
+        type=str,
+        default=None,
+        help="Cityscapes root, required when --run_quant_analyzer is set.",
+    )
+
+    parser.add_argument(
+        "--eval_split",
+        type=str,
+        default="val",
+        choices=["val", "test"],
+        help="Evaluation split for QuantAnalyzer.",
+    )
+
+    parser.add_argument(
+        "--eval_max_samples",
+        type=int,
+        default=-1,
+        help="Max eval samples for QuantAnalyzer, -1 means full split.",
+    )
+
     return parser.parse_args()
+
+def analyzer_forward_pass(model, callback_args):
+    calib_loader, device, max_batches = callback_args
+
+    was_training = model.training
+    model.eval()
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(calib_loader):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
+
+            image = find_first_numeric_tensor(batch)
+            if image is None:
+                raise ValueError(f"Could not find numeric tensor in analyzer batch type: {type(batch)}")
+
+            if isinstance(image, np.ndarray):
+                image = torch.from_numpy(image)
+
+            image = image.to(device)
+            if image.ndim == 3:
+                image = image.unsqueeze(0)
+
+            _ = model(image)
+
+    if was_training:
+        model.train()
+
+
+def analyzer_eval_callback(model, callback_args):
+    eval_loader, model_category_const, device, max_samples = callback_args
+
+    results = evaluate_model(
+        model_obj=model,
+        model_category_const=model_category_const,
+        loader=eval_loader,
+        device=device,
+        max_samples=max_samples,
+    )
+    return float(results["mIoU"])
 
 def run_seq_mse_forward_pass(model: torch.nn.Module, data_loader, max_batches: int) -> None:
     was_training = model.training
@@ -783,6 +870,71 @@ def maybe_run_seq_mse(
 
     return model
 
+def maybe_run_quant_analyzer(
+    model: torch.nn.Module,
+    dummy_input: torch.Tensor,
+    calib_loader,
+    model_category_const,
+    device: str,
+    enabled: bool,
+    quant_analyzer_dir: str,
+    analyzer_num_batches: Optional[int],
+    cityscapes_root: Optional[str],
+    eval_split: str,
+    eval_max_samples: int,
+) -> None:
+    if not enabled:
+        return
+
+    if cityscapes_root is None:
+        raise ValueError("--cityscapes_root is required when --run_quant_analyzer is set")
+
+    print("[INFO] Building evaluation loader for QuantAnalyzer...")
+    eval_loader = build_eval_loader(
+        cityscapes_root=cityscapes_root,
+        split=eval_split,
+        image_width=dummy_input.shape[-1],
+        image_height=dummy_input.shape[-2],
+        batch_size=1,
+        num_workers=2,
+    )
+
+    print("[INFO] Running AIMET QuantAnalyzer...")
+    os.makedirs(quant_analyzer_dir, exist_ok=True)
+
+    forward_pass_callback = CallbackFunc(
+        analyzer_forward_pass,
+        func_callback_args=(calib_loader, device, analyzer_num_batches),
+    )
+
+    eval_callback = CallbackFunc(
+        analyzer_eval_callback,
+        func_callback_args=(
+            eval_loader,
+            model_category_const,
+            device,
+            eval_max_samples,
+        ),
+    )
+
+    analyzer = QuantAnalyzer(
+        model=model,
+        dummy_input=dummy_input,
+        forward_pass_callback=forward_pass_callback,
+        eval_callback=eval_callback,
+        modules_to_ignore=None,
+    )
+
+    analyzer.analyze(
+        quant_scheme="tf_enhanced",
+        default_param_bw=8,
+        default_output_bw=8,
+        config_file=None,
+        results_dir=quant_analyzer_dir,
+    )
+
+    print(f"[INFO] QuantAnalyzer results saved to: {quant_analyzer_dir}")
+
 
 def export_fp32_onnx(
     model: torch.nn.Module,
@@ -994,7 +1146,7 @@ def main(args: argparse.Namespace) -> None:
     weight_symmetric = False if args.disable_weight_symmetric else args.weight_symmetric
 
     print("[INFO] Loading FP32 model...")
-    model, _ = build_model(
+    model, model_category_const = build_model(
         weights_path=args.weights_path,
         model_category=args.model_category,
         image_height=args.image_height,
@@ -1020,6 +1172,20 @@ def main(args: argparse.Namespace) -> None:
     print("[INFO] Collecting activation statistics on calibration data...")
     act_stats = collect_activation_stats(model, calib_loader, max_batches=8)
     print_top_activation_problems(act_stats, top_k=30)
+
+    maybe_run_quant_analyzer(
+        model=model,
+        dummy_input=dummy_input,
+        calib_loader=calib_loader,
+        model_category_const=model_category_const,
+        device=args.device,
+        enabled=args.run_quant_analyzer,
+        quant_analyzer_dir=os.path.join(args.export_path, args.quant_analyzer_dir),
+        analyzer_num_batches=args.analyzer_num_batches,
+        cityscapes_root=args.cityscapes_root,
+        eval_split=args.eval_split,
+        eval_max_samples=args.eval_max_samples,
+    )
 
     model = maybe_run_seq_mse(
         model=model,
