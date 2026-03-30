@@ -270,16 +270,17 @@ def compare_model_outputs(
     optimized_model_path: str,
     sample: Dict[str, np.ndarray],
     provider: str = "CPUExecutionProvider",
+    enable_all_optimizations: bool = False,
 ):
     orig_sess = make_session_from_model_path(
         original_model_path,
         provider=provider,
-        enable_all_optimizations=False,
+        enable_all_optimizations=enable_all_optimizations,
     )
     opt_sess = make_session_from_model_path(
         optimized_model_path,
         provider=provider,
-        enable_all_optimizations=False,
+        enable_all_optimizations=enable_all_optimizations,
     )
 
     orig_out = run_model(orig_sess, sample)
@@ -407,6 +408,7 @@ def run_all_outputs(
     model_path: str,
     sample: Dict[str, np.ndarray],
     provider: str = "CPUExecutionProvider",
+    enable_all_optimizations: bool = False,
 ):
     model = onnx.load(model_path)
     model_with_all_outputs = add_all_intermediate_float_outputs_to_model(model)
@@ -415,7 +417,7 @@ def run_all_outputs(
         sess = make_session_from_onnx_model(
             model_with_all_outputs,
             provider=provider,
-            enable_all_optimizations=False,
+            enable_all_optimizations=enable_all_optimizations,
         )
     except Exception as e:
         raise RuntimeError(f"Failed to create debug session for {model_path}: {e}")
@@ -431,9 +433,10 @@ def compare_all_tensors(
     provider: str = "CPUExecutionProvider",
     pcc_threshold: float = 0.99,
     cosine_threshold: float = 0.99,
+    enable_all_optimizations: bool = False,
 ):
-    orig_vals = run_all_outputs(original_model_path, sample, provider)
-    opt_vals = run_all_outputs(optimized_model_path, sample, provider)
+    orig_vals = run_all_outputs(original_model_path, sample, provider, enable_all_optimizations)
+    opt_vals = run_all_outputs(optimized_model_path, sample, provider, enable_all_optimizations)
 
     common_names = [n for n in orig_vals if n in opt_vals]
     rows = []
@@ -486,13 +489,14 @@ def main():
     parser.add_argument("--pcc_threshold", type=float, default=0.99)
     parser.add_argument("--cosine_threshold", type=float, default=0.99)
     parser.add_argument("--debug_batch", action="store_true")
+    parser.add_argument("--enable_all_optimizations", action="store_true")
 
     args = parser.parse_args()
 
     ref_sess = make_session_from_model_path(
         args.original_model,
         provider=args.provider,
-        enable_all_optimizations=False,
+        enable_all_optimizations=args.enable_all_optimizations,
     )
 
     sample = build_sample_from_loader(
@@ -511,6 +515,7 @@ def main():
         optimized_model_path=args.optimized_model,
         sample=sample,
         provider=args.provider,
+        enable_all_optimizations=args.enable_all_optimizations,
     )
 
     tensor_report = compare_all_tensors(
@@ -520,6 +525,7 @@ def main():
         provider=args.provider,
         pcc_threshold=args.pcc_threshold,
         cosine_threshold=args.cosine_threshold,
+        enable_all_optimizations=args.enable_all_optimizations,
     )
 
     report = {
