@@ -444,7 +444,9 @@ def main(args):
         "model.instance_head.decoder.res5.project_conv.convs.4.1",
     }
 
-    excluded_modules = []
+    excluded_modules = [
+        "model.instance_head.offset_predictor.Conv",
+    ]
     for name, module in wrapped_model.named_modules():
         if name in EXCLUDE_LAYERS:
             print(f"Ignoring SeqMSE, AdaRound for: {name} {module} {module.__class__}")

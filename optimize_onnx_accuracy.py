@@ -15,6 +15,45 @@ from evaluation.eval_dataset import build_eval_loader
 
 EPS = 1e-12
 
+import onnxruntime as ort
+from onnxruntime.quantization import quantize_static, quantize_dynamic
+from onnxruntime.quantization import QuantFormat, QuantType
+
+def export_optimized_onnx(input_model, optimized_model):
+    so = ort.SessionOptions()
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    so.optimized_model_filepath = optimized_model
+
+    # creating the session triggers optimization + dump
+    ort.InferenceSession(
+        input_model,
+        sess_options=so,
+        providers=["CPUExecutionProvider"],
+    )
+
+def export_qoperator_from_optimized(
+    optimized_model,
+    qop_model,
+    calibration_data_reader=None,
+):
+    if calibration_data_reader is None:
+        # dynamic quantization
+        quantize_dynamic(
+            model_input=optimized_model,
+            model_output=qop_model,
+            weight_type=QuantType.QInt8,
+            quant_format=QuantFormat.QOperator,
+        )
+    else:
+        # static quantization
+        quantize_static(
+            model_input=optimized_model,
+            model_output=qop_model,
+            calibration_data_reader=calibration_data_reader,
+            quant_format=QuantFormat.QOperator,
+            activation_type=QuantType.QUInt8,
+            weight_type=QuantType.QInt8,
+        )
 
 def make_session_from_model_path(
     model_path: str,
