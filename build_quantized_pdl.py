@@ -42,6 +42,23 @@ from aimet_torch.cross_layer_equalization import equalize_model
 
 from collections import defaultdict
 
+import json
+
+def load_tensor_quant_overrides(path: str) -> dict:
+    if not path:
+        return {}
+
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"tensor_quant_overrides_json not found: {path}")
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not isinstance(data, dict):
+        raise ValueError("TensorQuantOverrides JSON must be a dictionary.")
+
+    return data
+
 def should_track_module(name: str, module: torch.nn.Module) -> bool:
     track_types = (
         torch.nn.Conv2d,
@@ -531,6 +548,58 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=-1,
         help="Max eval samples for QuantAnalyzer, -1 means full split.",
+    )
+
+    parser.add_argument(
+        "--reduce_range",
+        action="store_true",
+        help="Use reduced-range quantization (7-bit effective range).",
+    )
+
+    parser.add_argument(
+        "--smooth_quant",
+        action="store_true",
+        help="Enable ONNX Runtime SmoothQuant before static quantization.",
+    )
+
+    parser.add_argument(
+        "--smooth_quant_alpha",
+        type=float,
+        default=0.5,
+        help="SmoothQuant alpha value.",
+    )
+
+    parser.add_argument(
+        "--smooth_quant_folding",
+        action="store_true",
+        default=True,
+        help="Fold inserted SmoothQuant Mul ops when possible.",
+    )
+
+    parser.add_argument(
+        "--disable_smooth_quant_folding",
+        action="store_true",
+        help="Disable SmoothQuant folding.",
+    )
+
+    parser.add_argument(
+        "--tensor_quant_overrides_json",
+        type=str,
+        default="",
+        help="Path to JSON file containing TensorQuantOverrides.",
+    )
+
+    parser.add_argument(
+        "--calib_tensor_range_symmetric",
+        action="store_true",
+        help="Force final calibrated tensor ranges to be symmetric around zero.",
+    )
+
+    parser.add_argument(
+        "--min_real_range",
+        type=float,
+        default=None,
+        help="Optional MinimumRealRange for quantization parameters.",
     )
 
     return parser.parse_args()
@@ -1069,6 +1138,13 @@ def export_quantized_onnx(
     provider: str = "CPUExecutionProvider",
     force_qoperator: bool = False,
     nodes_to_exclude: Optional[list[str]] = None,
+    reduce_range: bool = False,
+    smooth_quant: bool = False,
+    smooth_quant_alpha: float = 0.5,
+    smooth_quant_folding: bool = True,
+    tensor_quant_overrides: Optional[dict] = None,
+    calib_tensor_range_symmetric: bool = False,
+    min_real_range: Optional[float] = None,
 ) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -1108,6 +1184,30 @@ def export_quantized_onnx(
         for name in nodes_to_exclude:
             print(f"  - {name}")
 
+    tensor_quant_overrides = tensor_quant_overrides or {}
+
+    extra_options = {
+        "ActivationSymmetric": activation_symmetric,
+        "WeightSymmetric": weight_symmetric,
+        "CalibTensorRangeSymmetric": calib_tensor_range_symmetric,
+        "MinimumRealRange": min_real_range,
+    }
+
+    if smooth_quant:
+        extra_options["SmoothQuant"] = True
+        extra_options["SmoothQuantAlpha"] = smooth_quant_alpha
+        extra_options["SmoothQuantFolding"] = smooth_quant_folding
+
+    if tensor_quant_overrides:
+        extra_options["TensorQuantOverrides"] = tensor_quant_overrides
+
+    print(f"[INFO] Reduce range      : {reduce_range}")
+    print(f"[INFO] SmoothQuant      : {smooth_quant}")
+    if smooth_quant:
+        print(f"[INFO] SmoothQuant alpha: {smooth_quant_alpha}")
+        print(f"[INFO] SQ folding       : {smooth_quant_folding}")
+    print(f"[INFO] Tensor overrides : {bool(tensor_quant_overrides)}")
+
     quantize_static(
         model_input=fp32_onnx_path,
         model_output=output_path,
@@ -1117,11 +1217,9 @@ def export_quantized_onnx(
         weight_type=weight_type,
         calibrate_method=get_calibration_method(calibration_method_name),
         per_channel=per_channel,
+        reduce_range=reduce_range,
         nodes_to_exclude=nodes_to_exclude,
-        extra_options={
-            "ActivationSymmetric": activation_symmetric,
-            "WeightSymmetric": weight_symmetric,
-        }
+        extra_options=extra_options,
     )
 
     print(f"[INFO] Saved quantized ONNX to: {output_path}")
@@ -1244,6 +1342,10 @@ def main(args: argparse.Namespace) -> None:
         print("[INFO] Final selective quantization config:")
         print(f"[INFO]   excluded nodes: {nodes_to_exclude}")
 
+    tensor_quant_overrides = load_tensor_quant_overrides(args.tensor_quant_overrides_json)
+
+    smooth_quant_folding = not args.disable_smooth_quant_folding
+
     export_quantized_onnx(
         fp32_onnx_path=quant_input_path,
         output_path=quant_onnx_path,
@@ -1259,6 +1361,13 @@ def main(args: argparse.Namespace) -> None:
         provider=args.execution_provider,
         force_qoperator=args.force_qoperator,
         nodes_to_exclude=nodes_to_exclude,
+        reduce_range=args.reduce_range,
+        smooth_quant=args.smooth_quant,
+        smooth_quant_alpha=args.smooth_quant_alpha,
+        smooth_quant_folding=smooth_quant_folding,
+        tensor_quant_overrides=tensor_quant_overrides,
+        calib_tensor_range_symmetric=args.calib_tensor_range_symmetric,
+        min_real_range=args.min_real_range,
     )
 
     print("[INFO] Done.")
