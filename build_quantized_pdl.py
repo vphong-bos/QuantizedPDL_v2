@@ -925,8 +925,10 @@ def maybe_run_quant_analyzer(
         ),
     )
 
+    trace_safe_model = TraceOnlyTensorOutputWrapper(model).to(device).eval()
+
     analyzer = QuantAnalyzer(
-        model=model,
+        model=trace_safe_model,
         dummy_input=dummy_input,
         forward_pass_callback=forward_pass_callback,
         eval_callback=eval_callback,
