@@ -23,9 +23,6 @@ from onnx_neural_compressor import data_reader
 from onnx_neural_compressor.quantization import config, quantize
 from onnxruntime.quantization import QuantFormat, QuantType
 
-QuantFormat = config.QuantFormat
-QuantType = config.QuantType
-
 from model.pdl import build_model
 from quantization.calibration_dataset import (
     create_calibration_loader,
@@ -1066,7 +1063,7 @@ def export_quantized_onnx_with_inc(
     print("[INFO]   reduce_range      : True")
     print(f"[INFO]   per_channel       : {per_channel}")
     print(f"[INFO]   op_types_to_quant : {op_types_to_quantize}")
-    
+
     qmodel = quantize(
         model_input=fp32_onnx_path,
         quant_config=cfg,
