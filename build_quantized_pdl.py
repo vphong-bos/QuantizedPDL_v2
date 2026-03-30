@@ -462,6 +462,14 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--execution_provider",
+        type=str,
+        default="val",
+        choices=["CPUExecutionProvider", "CUDAExecutionProvider"],
+        help="Evaluation split for QuantAnalyzer.",
+    )
+
+    parser.add_argument(
         "--exclude_nodes",
         type=str,
         nargs="*",
@@ -1248,7 +1256,7 @@ def main(args: argparse.Namespace) -> None:
         activation_symmetric=args.activation_symmetric,
         weight_symmetric=weight_symmetric,
         calib_samples=args.num_calib,
-        provider="CPUExecutionProvider",
+        provider=args.execution_provider,
         force_qoperator=args.force_qoperator,
         nodes_to_exclude=nodes_to_exclude,
     )
