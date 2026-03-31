@@ -1021,8 +1021,6 @@ def build_calibration_loader(args: argparse.Namespace):
         num_workers=args.num_workers,
     )
 
-
-
 def export_quantized_onnx_with_inc(
     fp32_onnx_path: str,
     output_path: str,
@@ -1064,12 +1062,11 @@ def export_quantized_onnx_with_inc(
     print(f"[INFO]   per_channel       : {per_channel}")
     print(f"[INFO]   op_types_to_quant : {op_types_to_quantize}")
 
-    qmodel = quantize(
+    quantize(
         model_input=fp32_onnx_path,
+        model_output=output_path,
         quant_config=cfg,
-        calibration_data_reader=data_reader_obj,
     )
-    onnx.save_model(qmodel, output_path)
 
     print(f"[INFO] Saved quantized ONNX to: {output_path}")
 
@@ -1087,7 +1084,6 @@ def export_quantized_onnx_with_inc(
         f"[INFO] Verified QOperator export: "
         f"QLinearConv={qlinear_conv}, QLinearMatMul={qlinear_matmul}"
     )
-
 
 
 def main(args: argparse.Namespace) -> None:
