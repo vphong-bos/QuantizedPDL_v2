@@ -6,18 +6,14 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as T
 
 # ----------------------------
 # Cityscapes labelId -> trainId
 # ----------------------------
-# Standard Cityscapes mapping
 IGNORE_LABEL = 255
 
 ID_TO_TRAIN_ID = np.full((256,), IGNORE_LABEL, dtype=np.uint8)
 
-# road, sidewalk, building, wall, fence, pole, traffic light, traffic sign,
-# vegetation, terrain, sky, person, rider, car, truck, bus, train, motorcycle, bicycle
 MAPPING = {
     7: 0,
     8: 1,
@@ -42,13 +38,17 @@ MAPPING = {
 for k, v in MAPPING.items():
     ID_TO_TRAIN_ID[k] = v
 
+
 class EvalDataset(Dataset):
     def __init__(self, cityscapes_root, split="val", image_width=2048, image_height=1024):
         self.cityscapes_root = cityscapes_root
         self.split = split
         self.image_width = image_width
         self.image_height = image_height
-        self.to_tensor = T.ToTensor()
+
+        # RGB ImageNet normalization
+        self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
         pattern = os.path.join(
             cityscapes_root,
@@ -82,6 +82,8 @@ class EvalDataset(Dataset):
         image = cv2.imread(image_path)
         if image is None:
             raise ValueError(f"Failed to read image: {image_path}")
+
+        # OpenCV loads BGR -> convert to RGB
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         orig_h, orig_w = image.shape[:2]
 
@@ -90,7 +92,15 @@ class EvalDataset(Dataset):
             (self.image_width, self.image_height),
             interpolation=cv2.INTER_LINEAR,
         )
-        image_tensor = self.to_tensor(Image.fromarray(resized)).float()
+
+        # uint8 RGB [0,255] -> float32 RGB [0,1]
+        resized = resized.astype(np.float32) / 255.0
+
+        # Explicit ImageNet normalization
+        resized = (resized - self.mean) / self.std
+
+        # HWC -> CHW
+        image_tensor = torch.from_numpy(resized).permute(2, 0, 1).contiguous()
 
         label_ids = np.array(Image.open(label_path), dtype=np.uint8)
         train_ids = ID_TO_TRAIN_ID[label_ids]
@@ -103,6 +113,7 @@ class EvalDataset(Dataset):
             "orig_size": (orig_h, orig_w),
         }
 
+
 def eval_collate(batch):
     return batch
 
@@ -113,7 +124,7 @@ def build_eval_loader(
     image_width=1024,
     image_height=512,
     batch_size=1,
-    num_workers=2
+    num_workers=2,
 ):
     dataset = EvalDataset(
         cityscapes_root=cityscapes_root,
