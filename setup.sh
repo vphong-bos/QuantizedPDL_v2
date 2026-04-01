@@ -15,6 +15,16 @@ python -m pip install -q -r "${REQ_FILE}"
 echo "Installing Cityscapes scripts..."
 python -m pip install -q git+https://github.com/mcordts/cityscapesScripts.git
 
+echo "Installing neural-compressor..."
+cd "${SCRIPT_DIR}"
+if [ ! -d "neural-compressor" ]; then
+    git clone https://github.com/onnx/neural-compressor.git
+fi
+cd neural-compressor
+pip install -r requirements.txt
+pip install .
+cd "${SCRIPT_DIR}"
+
 echo "Preparing weights directory..."
 mkdir -p "${WEIGHTS_DIR}"
 
