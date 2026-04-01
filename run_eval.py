@@ -32,7 +32,7 @@ def parse_args():
 
     parser.add_argument("--fp32_weights", type=str,
                         help="Path to FP32 .pkl weights")
-    parser.add_argument("--quant_weights", type=str, required=True,
+    parser.add_argument("--quant_weights", type=str,
                         help="Path to quantized model: AIMET checkpoint (.pt/.pth/.pkl) or ONNX (.onnx)")
 
     parser.add_argument("--model_category", type=str, default="PANOPTIC_DEEPLAB",
@@ -114,61 +114,65 @@ def main():
             max_samples=args.max_samples,
         )
 
-    print("Loading quantized model...")
-    quant_obj = load_aimet_quantized_model(
-        quant_weights=args.quant_weights,
-        model_category=args.model_category,
-        device=args.device,
-        provider=args.onnx_provider,
-    )
+        print(fp32_results)
 
-    print("Evaluating quantized...")
-    quant_results = evaluate_model(
-        model_obj=quant_obj,
-        model_category_const=quant_obj["model_category_const"],
-        loader=loader,
-        device=args.device,
-        max_samples=args.max_samples,
-    )
+    if args.quant_weights:
 
-    if not args.fp32_weights:
-        print(quant_results)
+        print("Loading quantized model...")
+        quant_obj = load_aimet_quantized_model(
+            quant_weights=args.quant_weights,
+            model_category=args.model_category,
+            device=args.device,
+            provider=args.onnx_provider,
+        )
 
-    if args.fp32_weights:
-        print("Evaluating PCC between FP32 and quantized outputs...")
-        if quant_obj["backend"] == "torch":
-            pcc_results = evaluate_pcc(
-                fp32_model=fp32_model,
-                quant_model=quant_obj["model"],
-                loader=loader,
-                device=args.device,
-                max_samples=args.max_samples,
-            )
-            pcc_value = pcc_results["PCC"]
-        else:
-            print("Skipping PCC: current evaluate_pcc expects a torch model, but quant model is ONNX Runtime.")
-            pcc_value = float("nan")
+        print("Evaluating quantized...")
+        quant_results = evaluate_model(
+            model_obj=quant_obj,
+            model_category_const=quant_obj["model_category_const"],
+            loader=loader,
+            device=args.device,
+            max_samples=args.max_samples,
+        )
 
-        print("\n================ Compare FP32 vs Quantized ================")
+        if not args.fp32_weights:
+            print(quant_results)
 
-        print("---- Accuracy ----")
-        print(f"FP32  mIoU : {fp32_results['mIoU']:.4f}")
-        print(f"INT8  mIoU : {quant_results['mIoU']:.4f}")
-        print(f"Drop       : {quant_results['mIoU'] - fp32_results['mIoU']:.4f}")
+        if args.fp32_weights:
+            print("Evaluating PCC between FP32 and quantized outputs...")
+            if quant_obj["backend"] == "torch":
+                pcc_results = evaluate_pcc(
+                    fp32_model=fp32_model,
+                    quant_model=quant_obj["model"],
+                    loader=loader,
+                    device=args.device,
+                    max_samples=args.max_samples,
+                )
+                pcc_value = pcc_results["PCC"]
+            else:
+                print("Skipping PCC: current evaluate_pcc expects a torch model, but quant model is ONNX Runtime.")
+                pcc_value = float("nan")
 
-        print("\n---- Correlation ----")
-        print(f"PCC        : {pcc_value:.6f}")
+            print("\n================ Compare FP32 vs Quantized ================")
 
-        print("\n---- Performance ----")
-        print(f"FP32  FPS  : {fp32_results['FPS']:.2f}")
-        print(f"INT8  FPS  : {quant_results['FPS']:.2f}")
-        print(f"Speedup    : {quant_results['FPS'] / fp32_results['FPS']:.2f}x")
+            print("---- Accuracy ----")
+            print(f"FP32  mIoU : {fp32_results['mIoU']:.4f}")
+            print(f"INT8  mIoU : {quant_results['mIoU']:.4f}")
+            print(f"Drop       : {quant_results['mIoU'] - fp32_results['mIoU']:.4f}")
 
-        print(f"FP32  Latency (ms): {fp32_results['Avg_Inference_Time_ms']:.2f}")
-        print(f"INT8  Latency (ms): {quant_results['Avg_Inference_Time_ms']:.2f}")
-        print(f"Latency reduction : {fp32_results['Avg_Inference_Time_ms'] - quant_results['Avg_Inference_Time_ms']:.2f} ms")
+            print("\n---- Correlation ----")
+            print(f"PCC        : {pcc_value:.6f}")
 
-        print("===========================================================")
+            print("\n---- Performance ----")
+            print(f"FP32  FPS  : {fp32_results['FPS']:.2f}")
+            print(f"INT8  FPS  : {quant_results['FPS']:.2f}")
+            print(f"Speedup    : {quant_results['FPS'] / fp32_results['FPS']:.2f}x")
+
+            print(f"FP32  Latency (ms): {fp32_results['Avg_Inference_Time_ms']:.2f}")
+            print(f"INT8  Latency (ms): {quant_results['Avg_Inference_Time_ms']:.2f}")
+            print(f"Latency reduction : {fp32_results['Avg_Inference_Time_ms'] - quant_results['Avg_Inference_Time_ms']:.2f} ms")
+
+            print("===========================================================")
 
 if __name__ == "__main__":
     main()
