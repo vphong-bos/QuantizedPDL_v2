@@ -235,6 +235,54 @@ def convert_qlinearmatmul(node, new_nodes):
     )
     return True
 
+def convert_qlinearadd(node, new_nodes):
+    # QLinearAdd:
+    # A, A_scale, A_zp, B, B_scale, B_zp, C_scale, C_zp
+    if len(node.input) != 8:
+        print("[WARN] Skip {}: unexpected QLinearAdd input count = {}".format(node.name, len(node.input)))
+        return False
+
+    node_name = sanitize_name(node.name, "QLinearAdd")
+
+    a = node.input[0]
+    a_scale = node.input[1]
+    a_zp = node.input[2]
+
+    b = node.input[3]
+    b_scale = node.input[4]
+    b_zp = node.input[5]
+
+    y_scale = node.input[6]
+    y_zp = node.input[7]
+
+    y = node.output[0]
+
+    a_dq = "{}_a_dq".format(node_name)
+    b_dq = "{}_b_dq".format(node_name)
+    add_out = "{}_add_out".format(node_name)
+
+    new_nodes.append(
+        make_dq_node(a, a_scale, a_zp, a_dq, "{}_DequantizeA".format(node_name))
+    )
+    new_nodes.append(
+        make_dq_node(b, b_scale, b_zp, b_dq, "{}_DequantizeB".format(node_name))
+    )
+
+    new_nodes.append(
+        helper.make_node(
+            "Add",
+            inputs=[a_dq, b_dq],
+            outputs=[add_out],
+            name="{}_Add".format(node_name),
+        )
+    )
+
+    new_nodes.append(
+        make_q_node(add_out, y_scale, y_zp, y, "{}_QuantizeOutput".format(node_name))
+    )
+
+    return True
+
 
 def convert_model(model, fail_if_unsupported=False):
     initializer_map = get_initializer_map(model)
@@ -261,6 +309,11 @@ def convert_model(model, fail_if_unsupported=False):
             )
         elif node.op_type == "QLinearMatMul":
             converted = convert_qlinearmatmul(
+                node=node,
+                new_nodes=new_nodes,
+            )
+        elif node.op_type == "QLinearAdd":
+            converted = convert_qlinearadd(
                 node=node,
                 new_nodes=new_nodes,
             )
