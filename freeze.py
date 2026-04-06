@@ -620,14 +620,14 @@ def main():
             "model_category_const": fp32_category,
         }
 
-        print("[INFO] Evaluating FP32 model...")
-        fp32_results = evaluate_model(
-            model_obj=fp32_model_obj,
-            model_category_const=fp32_category,
-            loader=loader,
-            device=args.device,
-            max_samples=args.max_samples,
-        )
+        # print("[INFO] Evaluating FP32 model...")
+        # fp32_results = evaluate_model(
+        #     model_obj=fp32_model_obj,
+        #     model_category_const=fp32_category,
+        #     loader=loader,
+        #     device=args.device,
+        #     max_samples=args.max_samples,
+        # )
 
     print("[INFO] Loading quantized/exported model...")
     quant_obj = load_aimet_quantized_model(
@@ -637,32 +637,32 @@ def main():
         provider=args.onnx_provider,
     )
 
-    print("[INFO] Evaluating quantized/exported model...")
-    quant_results = evaluate_model(
-        model_obj=quant_obj,
-        model_category_const=quant_obj["model_category_const"],
-        loader=loader,
-        device=args.device,
-        max_samples=args.max_samples,
-    )
+    # print("[INFO] Evaluating quantized/exported model...")
+    # quant_results = evaluate_model(
+    #     model_obj=quant_obj,
+    #     model_category_const=quant_obj["model_category_const"],
+    #     loader=loader,
+    #     device=args.device,
+    #     max_samples=args.max_samples,
+    # )
 
-    if fp32_results is not None:
-        accuracy_summary = {
-            "fp32_mIoU": fp32_results["mIoU"],
-            "quant_mIoU": quant_results["mIoU"],
-            "miou_drop": quant_results["mIoU"] - fp32_results["mIoU"],
-            "fp32_fps": fp32_results["FPS"],
-            "quant_fps": quant_results["FPS"],
-            "speedup_x": (
-                quant_results["FPS"] / fp32_results["FPS"]
-                if fp32_results["FPS"] != 0 else None
-            ),
-            "fp32_latency_ms": fp32_results["Avg_Inference_Time_ms"],
-            "quant_latency_ms": quant_results["Avg_Inference_Time_ms"],
-            "latency_delta_ms": (
-                quant_results["Avg_Inference_Time_ms"] - fp32_results["Avg_Inference_Time_ms"]
-            ),
-        }
+    # if fp32_results is not None:
+    #     accuracy_summary = {
+    #         "fp32_mIoU": fp32_results["mIoU"],
+    #         "quant_mIoU": quant_results["mIoU"],
+    #         "miou_drop": quant_results["mIoU"] - fp32_results["mIoU"],
+    #         "fp32_fps": fp32_results["FPS"],
+    #         "quant_fps": quant_results["FPS"],
+    #         "speedup_x": (
+    #             quant_results["FPS"] / fp32_results["FPS"]
+    #             if fp32_results["FPS"] != 0 else None
+    #         ),
+    #         "fp32_latency_ms": fp32_results["Avg_Inference_Time_ms"],
+    #         "quant_latency_ms": quant_results["Avg_Inference_Time_ms"],
+    #         "latency_delta_ms": (
+    #             quant_results["Avg_Inference_Time_ms"] - fp32_results["Avg_Inference_Time_ms"]
+    #         ),
+    #     }
 
     print("[INFO] Copying model assets...")
     packaged_fp32_weights = copy_into_package(args.fp32_weights, models_dir) if args.fp32_weights else None
