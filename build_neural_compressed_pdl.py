@@ -369,7 +369,7 @@ def parse_args() -> argparse.Namespace:
         "--quant_format",
         type=str,
         default="qoperator",
-        choices=["qoperator"],
+        choices=["qoperator", "qdq"],
         help="Kept fixed to QOperator as requested.",
     )
     parser.add_argument(
@@ -529,7 +529,7 @@ def parse_args() -> argparse.Namespace:
         "--inc_quant_format",
         type=str,
         default="QOperator",
-        choices=["QOperator"],
+        choices=["QOperator", "QDQ"],
         help="INC export format. Kept fixed to QOperator.",
     )
     parser.add_argument(
@@ -542,6 +542,13 @@ def parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
+def to_quant_format(fmt: str) -> QuantFormat:
+    fmt_norm = fmt.strip().lower()
+    if fmt_norm == "qoperator":
+        return QuantFormat.QOperator
+    if fmt_norm == "qdq":
+        return QuantFormat.QDQ
+    raise ValueError(f"Unsupported quant format: {fmt}")
 
 class LoaderCalibrationDataReader(data_reader.CalibrationDataReader):
     def __init__(self, model_path: str, loader: Iterable[Any], max_samples: int = -1):
@@ -596,10 +603,11 @@ class INCExcludeOutputQuantConfig(config.StaticQuantConfig):
         per_channel: bool = True,
         execution_provider: str = "CPUExecutionProvider",
         reduce_range: bool = True,
+        quant_format: QuantFormat = QuantFormat.QOperator,
     ):
         super().__init__(
             calibration_data_reader=calibration_data_reader,
-            quant_format=QuantFormat.QOperator,
+            quant_format=quant_format,
             activation_type=QuantType.QInt8,
             weight_type=QuantType.QInt8,
             execution_provider=execution_provider,
@@ -1028,6 +1036,7 @@ def export_quantized_onnx_with_inc(
     per_channel: bool,
     nodes_to_exclude: Optional[list[str]] = None,
     op_types_to_quantize: Optional[list[str]] = None,
+    quant_format: QuantFormat = QuantFormat.QOperator,
 ) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     nodes_to_exclude = nodes_to_exclude or []
@@ -1050,10 +1059,11 @@ def export_quantized_onnx_with_inc(
         per_channel=per_channel,
         execution_provider="CPUExecutionProvider",
         reduce_range=True,
+        quant_format=quant_format,
     )
 
     print("[INFO] INC quantization config summary:")
-    print(f"[INFO]   quant_format      : {QuantFormat.QOperator}")
+    print(f"[INFO]   quant_format      : {quant_format}")
     print(f"[INFO]   activation_type   : {QuantType.QInt8}")
     print(f"[INFO]   weight_type       : {QuantType.QInt8}")
     print("[INFO]   activation_sym    : True")
@@ -1073,13 +1083,30 @@ def export_quantized_onnx_with_inc(
     quant_stats = collect_onnx_op_counts(output_path)
     qlinear_conv = quant_stats.get("QLinearConv", 0)
     qlinear_matmul = quant_stats.get("QLinearMatMul", 0)
+    q_nodes = quant_stats.get("QuantizeLinear", 0)
+    dq_nodes = quant_stats.get("DequantizeLinear", 0)
 
-    if qlinear_conv == 0 and qlinear_matmul == 0:
-        raise RuntimeError(
-            "Requested QOperator export, but the output model does not contain "
-            "QLinearConv or QLinearMatMul nodes."
+
+    if quant_format == QuantFormat.QOperator:
+        if qlinear_conv == 0 and qlinear_matmul == 0:
+            raise RuntimeError(
+                "Requested QOperator export, but the output model does not contain "
+                "QLinearConv or QLinearMatMul nodes."
+            )
+        print(
+            f"[INFO] Verified QOperator export: "
+            f"QLinearConv={qlinear_conv}, QLinearMatMul={qlinear_matmul}"
         )
-
+    elif quant_format == QuantFormat.QDQ:
+        if q_nodes == 0 or dq_nodes == 0:
+            raise RuntimeError(
+                "Requested QDQ export, but the output model does not contain "
+                "QuantizeLinear/DequantizeLinear nodes."
+            )
+        print(
+            f"[INFO] Verified QDQ export: "
+            f"QuantizeLinear={q_nodes}, DequantizeLinear={dq_nodes}"
+        )
     print(
         f"[INFO] Verified QOperator export: "
         f"QLinearConv={qlinear_conv}, QLinearMatMul={qlinear_matmul}"
@@ -1096,6 +1123,8 @@ def main(args: argparse.Namespace) -> None:
 
     set_random_seed(args.seed)
     os.makedirs(args.export_path, exist_ok=True)
+
+    quant_format = to_quant_format(args.quant_format)
 
     per_channel = False if args.disable_per_channel else args.per_channel
     weight_symmetric = False if args.disable_weight_symmetric else args.weight_symmetric
@@ -1198,6 +1227,7 @@ def main(args: argparse.Namespace) -> None:
         per_channel=per_channel,
         nodes_to_exclude=nodes_to_exclude,
         op_types_to_quantize=args.op_types_to_quantize,
+        quant_format=quant_format,
     )
 
     print("[INFO] Done.")
