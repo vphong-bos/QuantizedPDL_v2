@@ -4,18 +4,29 @@ import json
 import os
 import shutil
 import hashlib
+import time
 from datetime import datetime
 
 import numpy as np
 import onnx
+import onnxruntime as ort
 import torch
 from onnx import numpy_helper
 
-from model.pdl import build_model
+from model.pdl import (
+    DEEPLAB_V3_PLUS,
+    PANOPTIC_DEEPLAB,
+    build_model,
+)
 from quantization.quantize_function import load_aimet_quantized_model
 
-from evaluation.eval_dataset import build_eval_loader
-from evaluation.eval_metrics import evaluate_model
+from utils.image_loader import load_images, preprocess_image
+from utils.demo_utils import (
+    create_deeplab_v3plus_visualization,
+    create_panoptic_visualization,
+    save_predictions,
+)
+
 
 QUANT_OP_TYPES_EXACT = {
     "QuantizeLinear",
@@ -43,15 +54,8 @@ QUANT_OP_KEYWORDS = (
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Freeze and package PDL quantization handoff artifacts."
+        description="Freeze and package PDL quantization handoff artifacts with demo outputs."
     )
-
-    parser.add_argument("--cityscapes_root", type=str, required=True)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--max_samples", type=int, default=16)
-    parser.add_argument("--split", type=str, default="val", choices=["val", "test"])
-    parser.add_argument("--num_sample_inputs", type=int, default=3)
 
     parser.add_argument("--package_root", type=str, default="handoff_packages")
     parser.add_argument("--artifact_name", type=str, default="pdl_quant_handoff")
@@ -80,11 +84,18 @@ def parse_args():
     parser.add_argument("--sample_input_npys", type=str, nargs="*", default=[],
                         help="Optional list of .npy sample inputs used to generate reference outputs")
 
-    parser.add_argument("--accuracy_result_json", type=str, default=None,
-                        help="Optional precomputed accuracy-vs-FP32 JSON to include in package")
+    parser.add_argument("--demo_images", type=str, required=True,
+                        help="Image file or folder for demo inference")
+    parser.add_argument("--demo_num_iters", type=int, default=-1,
+                        help="Number of demo images to process; -1 means all")
+    parser.add_argument("--demo_output_path", type=str, default=None,
+                        help="Optional output directory for demo visualizations. Defaults inside package.")
+    parser.add_argument("--center_threshold", type=float, default=0.05,
+                        help="Center threshold for panoptic visualization")
+
     parser.add_argument("--accuracy_note", type=str,
-                        default="Not evaluated in this freeze package",
-                        help="Freeform note when runtime evaluation is omitted")
+                        default="Not evaluated in this freeze package; demo included instead",
+                        help="Freeform note for accuracy field when runtime eval is omitted")
     parser.add_argument("--notes", type=str, default="",
                         help="Optional freeform note to include in package")
 
@@ -112,6 +123,7 @@ def sha256_file(path):
 def copy_into_package(src_path, dst_dir):
     if not src_path:
         return None
+
     ensure_dir(dst_dir)
     dst_path = os.path.join(dst_dir, os.path.basename(src_path))
     shutil.copy2(src_path, dst_path)
@@ -213,6 +225,7 @@ def collect_onnx_op_inventory(model_path):
         "nodes": node_rows,
     }
 
+
 def collect_onnx_qparams_and_tensor_metadata(model_path):
     model = onnx.load(model_path, load_external_data=False)
     qparams = []
@@ -293,6 +306,7 @@ def collect_onnx_qparams_and_tensor_metadata(model_path):
         "qparam_nodes": qparams,
         "initializer_tensor_metadata": tensor_meta,
     }
+
 
 def compare_onnx_graphs(fp32_onnx_path, quant_onnx_path):
     if not fp32_onnx_path or not quant_onnx_path:
@@ -539,6 +553,224 @@ def save_state_dict_artifact(state_dict_obj, output_path):
     }
 
 
+def load_demo_model(weights_path, model_category, image_height, image_width, device, onnx_provider):
+    ext = os.path.splitext(weights_path)[1].lower()
+
+    if ext == ".onnx":
+        print("[INFO] Loading ONNX model for demo...")
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+
+        session = ort.InferenceSession(
+            weights_path,
+            sess_options=so,
+            providers=[onnx_provider],
+        )
+
+        input_name = session.get_inputs()[0].name
+        output_names = [o.name for o in session.get_outputs()]
+
+        model_category_const = (
+            PANOPTIC_DEEPLAB if model_category == "PANOPTIC_DEEPLAB" else DEEPLAB_V3_PLUS
+        )
+
+        return {
+            "backend": "onnx",
+            "session": session,
+            "input_name": input_name,
+            "output_names": output_names,
+            "model": None,
+            "model_category_const": model_category_const,
+        }
+
+    print("[INFO] Loading PyTorch model for demo...")
+    model, model_category_const = build_model(
+        weights_path=weights_path,
+        model_category=model_category,
+        image_height=image_height,
+        image_width=image_width,
+        device=device,
+    )
+
+    return {
+        "backend": "torch",
+        "model": model,
+        "session": None,
+        "input_name": None,
+        "output_names": None,
+        "model_category_const": model_category_const,
+    }
+
+
+def run_demo_inference(model_obj, torch_input, model_category_const):
+    if model_obj["backend"] == "torch":
+        with torch.no_grad():
+            outputs = model_obj["model"](torch_input)
+
+        if model_category_const == DEEPLAB_V3_PLUS:
+            if isinstance(outputs, torch.Tensor):
+                return outputs
+            if isinstance(outputs, (list, tuple)):
+                return outputs[0]
+            if isinstance(outputs, dict):
+                if "out" in outputs:
+                    return outputs["out"]
+                return next(iter(outputs.values()))
+            raise RuntimeError("Unsupported Deeplab torch output type: {}".format(type(outputs)))
+
+        if not isinstance(outputs, (list, tuple)) or len(outputs) < 3:
+            raise RuntimeError("Expected panoptic torch output tuple/list with at least 3 elements")
+        semantic_logits, center_heatmap, offset_map = outputs[0], outputs[1], outputs[2]
+        extra = outputs[3] if len(outputs) > 3 else None
+        return semantic_logits, center_heatmap, offset_map, extra
+
+    elif model_obj["backend"] == "onnx":
+        session = model_obj["session"]
+        input_name = model_obj["input_name"]
+
+        input_np = torch_input.detach().cpu().numpy().astype(np.float32, copy=False)
+        outputs = session.run(None, {input_name: input_np})
+
+        if model_category_const == DEEPLAB_V3_PLUS:
+            semantic_logits = torch.from_numpy(outputs[0]).float()
+            if semantic_logits.ndim == 4 and semantic_logits.shape[1] != 19 and semantic_logits.shape[-1] == 19:
+                semantic_logits = semantic_logits.permute(0, 3, 1, 2).contiguous()
+            return semantic_logits
+
+        semantic_logits = torch.from_numpy(outputs[0]).float()
+        center_heatmap = torch.from_numpy(outputs[1]).float()
+        offset_map = torch.from_numpy(outputs[2]).float()
+        extra = torch.from_numpy(outputs[3]).float() if len(outputs) > 3 else None
+
+        if semantic_logits.ndim == 4 and semantic_logits.shape[1] != 19 and semantic_logits.shape[-1] == 19:
+            semantic_logits = semantic_logits.permute(0, 3, 1, 2).contiguous()
+
+        if center_heatmap.ndim == 4 and center_heatmap.shape[1] not in (1, 2) and center_heatmap.shape[-1] in (1, 2):
+            center_heatmap = center_heatmap.permute(0, 3, 1, 2).contiguous()
+
+        if offset_map.ndim == 4 and offset_map.shape[1] not in (1, 2) and offset_map.shape[-1] in (1, 2):
+            offset_map = offset_map.permute(0, 3, 1, 2).contiguous()
+
+        return semantic_logits, center_heatmap, offset_map, extra
+
+    raise ValueError(f"Unsupported backend: {model_obj['backend']}")
+
+
+def save_demo_visualization(
+    model_category_const,
+    output,
+    original_image,
+    output_path,
+    image_path,
+    center_threshold=0.05,
+):
+    image_name = os.path.basename(image_path)
+    image_stem = os.path.splitext(image_name)[0]
+    output_dir = os.path.join(output_path, f"{image_stem}_output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    if model_category_const == DEEPLAB_V3_PLUS:
+        semantic_logits = output
+        semantic_np = semantic_logits.float().squeeze(0).permute(1, 2, 0).cpu().numpy()
+
+        vis, _ = create_deeplab_v3plus_visualization(
+            semantic_np,
+            original_image=original_image,
+        )
+    else:
+        semantic_logits, center_heatmap, offset_map, _ = output
+
+        semantic_np = semantic_logits.float().squeeze(0).permute(1, 2, 0).cpu().numpy()
+        center_np = center_heatmap.float().squeeze(0).permute(1, 2, 0).cpu().numpy()
+        offset_np = offset_map.float().squeeze(0).permute(1, 2, 0).cpu().numpy()
+
+        vis, _ = create_panoptic_visualization(
+            semantic_np,
+            center_np,
+            offset_np,
+            original_image,
+            center_threshold=center_threshold,
+            score_threshold=center_threshold,
+            stuff_area=1,
+            top_k=1000,
+            nms_kernel=11,
+        )
+
+    save_predictions(output_dir, image_name, original_image, vis)
+
+    return {
+        "image_name": image_name,
+        "output_dir": output_dir,
+    }
+
+
+def run_demo_and_package_outputs(args, model_obj, demo_output_dir):
+    os.makedirs(demo_output_dir, exist_ok=True)
+
+    images = load_images(args.demo_images, args.demo_num_iters)
+    if len(images) == 0:
+        raise ValueError(f"No valid images found in: {args.demo_images}")
+
+    rows = []
+    total_start = time.time()
+
+    for i, image_path in enumerate(images, start=1):
+        preprocess_device = args.device
+        if model_obj["backend"] == "onnx" and args.onnx_provider == "CPUExecutionProvider":
+            preprocess_device = "cpu"
+
+        original_image, torch_input = preprocess_image(
+            image_path=image_path,
+            input_width=args.image_width,
+            input_height=args.image_height,
+            device=preprocess_device,
+        )
+
+        if model_obj["backend"] == "torch" and args.device == "cuda":
+            torch.cuda.synchronize()
+
+        start_time = time.time()
+        output = run_demo_inference(model_obj, torch_input, model_obj["model_category_const"])
+        if model_obj["backend"] == "torch" and args.device == "cuda":
+            torch.cuda.synchronize()
+        end_time = time.time()
+
+        vis_info = save_demo_visualization(
+            model_category_const=model_obj["model_category_const"],
+            output=output,
+            original_image=original_image,
+            output_path=demo_output_dir,
+            image_path=image_path,
+            center_threshold=args.center_threshold,
+        )
+
+        rows.append({
+            "index": i - 1,
+            "image_path": image_path,
+            "image_name": os.path.basename(image_path),
+            "latency_ms": (end_time - start_time) * 1000.0,
+            "visualization_output_dir": os.path.relpath(vis_info["output_dir"], demo_output_dir),
+        })
+
+        print(f"[{i}/{len(images)}] {os.path.basename(image_path)}: {(end_time - start_time) * 1000:.2f} ms")
+
+    total_end = time.time()
+    total_time = total_end - total_start
+    fps = len(images) / total_time if total_time > 0 else 0.0
+
+    summary = {
+        "model_category": args.model_category,
+        "backend": model_obj["backend"],
+        "onnx_provider": args.onnx_provider if model_obj["backend"] == "onnx" else None,
+        "num_inputs": len(images),
+        "total_execution_time_s": total_time,
+        "samples_per_second": fps,
+        "per_image": rows,
+    }
+
+    return summary
+
+
 def build_notes_md(manifest, accuracy_summary, graph_diff, op_inventory, args):
     lines = []
     lines.append("# PDL Quantization Handoff")
@@ -563,6 +795,11 @@ def build_notes_md(manifest, accuracy_summary, graph_diff, op_inventory, args):
             lines.append("- {}: {}".format(k, v))
     else:
         lines.append("- Not provided")
+    lines.append("")
+    lines.append("## Demo")
+    lines.append("- Demo images: {}".format(args.demo_images))
+    lines.append("- See `reports/demo_report.json` for per-image latency and demo throughput.")
+    lines.append("- Demo visualizations are stored under `demo_outputs/` inside the package unless an explicit output path was used.")
     lines.append("")
     lines.append("## Quant Graph Summary")
     if isinstance(op_inventory, dict) and "node_count" in op_inventory:
@@ -629,21 +866,12 @@ def main():
 
     verification = verify_model_loadability(args.fp32_weights, args.quant_model, args)
 
-    print("[INFO] Building evaluation loader...")
-    loader = build_eval_loader(
-        cityscapes_root=args.cityscapes_root,
-        split=args.split,
-        image_width=args.image_width,
-        image_height=args.image_height,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-    )
-
     fp32_model_obj = None
-    fp32_results = None
     quant_obj = None
-    quant_results = None
-    accuracy_summary = None
+    accuracy_summary = {
+        "status": "not_evaluated_in_this_freeze",
+        "note": args.accuracy_note,
+    }
 
     if args.fp32_weights:
         print("[INFO] Loading FP32 model...")
@@ -663,15 +891,6 @@ def main():
             "model_category_const": fp32_category,
         }
 
-        print("[INFO] Evaluating FP32 model...")
-        fp32_results = evaluate_model(
-            model_obj=fp32_model_obj,
-            model_category_const=fp32_category,
-            loader=loader,
-            device=args.device,
-            max_samples=args.max_samples,
-        )
-
     print("[INFO] Loading quantized/exported model...")
     quant_obj = load_aimet_quantized_model(
         quant_weights=args.quant_model,
@@ -679,43 +898,6 @@ def main():
         device=args.device,
         provider=args.onnx_provider,
     )
-
-    print("[INFO] Evaluating quantized/exported model...")
-    quant_results = evaluate_model(
-        model_obj=quant_obj,
-        model_category_const=quant_obj["model_category_const"],
-        loader=loader,
-        device=args.device,
-        max_samples=args.max_samples,
-    )
-
-    if fp32_results is not None:
-        accuracy_summary = {
-            "fp32_mIoU": fp32_results["mIoU"],
-            "quant_mIoU": quant_results["mIoU"],
-            "miou_drop": quant_results["mIoU"] - fp32_results["mIoU"],
-            "fp32_fps": fp32_results["FPS"],
-            "quant_fps": quant_results["FPS"],
-            "speedup_x": (
-                quant_results["FPS"] / fp32_results["FPS"]
-                if fp32_results["FPS"] != 0 else None
-            ),
-            "fp32_latency_ms": fp32_results["Avg_Inference_Time_ms"],
-            "quant_latency_ms": quant_results["Avg_Inference_Time_ms"],
-            "latency_delta_ms": (
-                quant_results["Avg_Inference_Time_ms"] - fp32_results["Avg_Inference_Time_ms"]
-            ),
-        }
-    else:
-        accuracy_summary = {
-            "status": "fp32_baseline_not_provided",
-            "quant_mIoU": quant_results["mIoU"] if quant_results is not None else None,
-            "quant_fps": quant_results["FPS"] if quant_results is not None else None,
-            "quant_latency_ms": (
-                quant_results["Avg_Inference_Time_ms"] if quant_results is not None else None
-            ),
-            "note": args.accuracy_note,
-        }
 
     print("[INFO] Copying model assets...")
     packaged_fp32_weights = copy_into_package(args.fp32_weights, models_dir) if args.fp32_weights else None
@@ -792,12 +974,19 @@ def main():
         print("[WARN] No sample inputs provided. sample_io_index will be empty.")
         sample_io_index = []
 
-    save_json(quant_results, os.path.join(reports_dir, "quant_eval.json"))
-    if fp32_results is not None:
-        save_json(fp32_results, os.path.join(reports_dir, "fp32_eval.json"))
-    if accuracy_summary is not None:
-        save_json(accuracy_summary, os.path.join(reports_dir, "accuracy_compare.json"))
+    print("[INFO] Running demo and saving visualizations...")
+    demo_output_dir = args.demo_output_path
+    if demo_output_dir is None:
+        demo_output_dir = os.path.join(package_dir, "demo_outputs")
 
+    demo_summary = run_demo_and_package_outputs(
+        args=args,
+        model_obj=quant_obj,
+        demo_output_dir=demo_output_dir,
+    )
+
+    save_json(demo_summary, os.path.join(reports_dir, "demo_report.json"))
+    save_json(accuracy_summary, os.path.join(reports_dir, "accuracy_compare.json"))
     save_json(quant_op_inventory, os.path.join(notes_dir, "op_inventory.json"))
     save_json(quant_qparams, os.path.join(notes_dir, "quant_assets.json"))
     save_json(sample_io_index, os.path.join(notes_dir, "sample_io_index.json"))
@@ -826,16 +1015,11 @@ def main():
                 extracted_state_dict_info["sha256"] if extracted_state_dict_info is not None else None
             ),
         },
-        "evaluation": {
-            "split": args.split,
-            "max_samples": args.max_samples,
-            "batch_size": args.batch_size,
-            "image_height": args.image_height,
-            "image_width": args.image_width,
-            "onnx_provider": args.onnx_provider,
-            "quant_results_file": "reports/quant_eval.json",
-            "fp32_results_file": "reports/fp32_eval.json" if fp32_results is not None else None,
-            "accuracy_compare_file": "reports/accuracy_compare.json" if accuracy_summary is not None else None,
+        "demo": {
+            "images": args.demo_images,
+            "num_iters": args.demo_num_iters,
+            "output_dir": "demo_outputs" if args.demo_output_path is None else args.demo_output_path,
+            "report_file": "reports/demo_report.json",
         },
         "packaged_assets": {
             "sample_io_dir": "assets/sample_io",
@@ -844,8 +1028,7 @@ def main():
             "op_inventory": "notes/op_inventory.json",
             "graph_diff": "notes/graph_diff.json" if graph_diff is not None else None,
             "accuracy_compare": "reports/accuracy_compare.json",
-            "quant_eval": "reports/quant_eval.json",
-            "fp32_eval": "reports/fp32_eval.json" if fp32_results is not None else None,
+            "demo_report": "reports/demo_report.json",
             "checkpoint_inspection": "notes/quant_checkpoint_inspection.json" if checkpoint_inspection is not None else None,
             "state_dict_info": "notes/quant_state_dict_info.json" if extracted_state_dict_info is not None else None,
         },
@@ -879,6 +1062,7 @@ def main():
 
     print("[INFO] Package created successfully:")
     print(package_dir)
+
 
 if __name__ == "__main__":
     main()
