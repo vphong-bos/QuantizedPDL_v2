@@ -27,7 +27,6 @@ from utils.demo_utils import (
     save_predictions,
 )
 
-
 QUANT_OP_TYPES_EXACT = {
     "QuantizeLinear",
     "DequantizeLinear",
@@ -262,7 +261,6 @@ def collect_onnx_qparams_and_tensor_metadata(model_path):
                 arr = numpy_helper.to_array(init)
                 meta_row["dtype"] = str(arr.dtype)
                 meta_row["summary"] = summarize_array(arr)
-                meta_row["value"] = arr.tolist()
             except Exception as e:
                 meta_row["summary_error"] = str(e)
 

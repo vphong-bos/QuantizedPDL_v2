@@ -613,7 +613,7 @@ class INCExcludeOutputQuantConfig(config.StaticQuantConfig):
             execution_provider=execution_provider,
             per_channel=per_channel,
             reduce_range=reduce_range,
-            op_types_to_quantize=op_types_to_quantize or ["Conv", "MatMul", "Add", "Mul"],
+            # op_types_to_quantize=op_types_to_quantize or ["Conv", "MatMul", "Add", "Mul"],
             nodes_to_exclude=nodes_to_exclude or [],
         )
 

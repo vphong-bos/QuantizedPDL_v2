@@ -75,8 +75,8 @@ def parse_args(argv=None):
     parser.add_argument("--num_calib", type=int, default=800, help="number of calibration images")
     parser.add_argument("--batch_size", type=int, default=1, help="AIMET calibration batch size")
     parser.add_argument("--num_workers", type=int, default=2, help="dataloader workers")
-    parser.add_argument("--seed", type=int, default=123, help="random seed for calibration sampling")
-
+    parser.add_argument("--seed", type=int, default=16, help="random seed for calibration sampling")
+    
     parser.add_argument("--quant_scheme", type=str, default="tf_enhanced", help="AIMET quantization scheme")
     parser.add_argument("--default_output_bw", type=int, default=8, help="activation bitwidth")
     parser.add_argument("--default_param_bw", type=int, default=8, help="parameter bitwidth")
