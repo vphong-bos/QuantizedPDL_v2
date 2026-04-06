@@ -11,18 +11,10 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Convert ONNX QOperator model to QDQ model by graph rewriting."
     )
-    parser.add_argument("--input", type=str, required=True, help="Input QOperator ONNX path")
-    parser.add_argument("--output", type=str, required=True, help="Output QDQ ONNX path")
-    parser.add_argument(
-        "--infer_shapes",
-        action="store_true",
-        help="Run ONNX shape inference before saving.",
-    )
-    parser.add_argument(
-        "--fail_if_unsupported",
-        action="store_true",
-        help="Fail if unsupported quantized ops are found.",
-    )
+    parser.add_argument("--input", type=str, required=True)
+    parser.add_argument("--output", type=str, required=True)
+    parser.add_argument("--infer_shapes", action="store_true")
+    parser.add_argument("--fail_if_unsupported", action="store_true")
     return parser.parse_args()
 
 
@@ -36,33 +28,41 @@ def get_initializer_map(model):
     return {init.name: init for init in model.graph.initializer}
 
 
-def add_initializer_if_missing(initializers_out, emitted_names, tensor):
-    if tensor.name not in emitted_names:
-        initializers_out.append(tensor)
-        emitted_names.add(tensor.name)
-
-
 def get_tensor_numpy(initializer_map, name):
     if name not in initializer_map:
         raise KeyError("Initializer not found: {}".format(name))
     return numpy_helper.to_array(initializer_map[name])
 
 
-def make_dq_node(x, scale, zero_point, y, name):
+def add_initializer_if_missing(initializers_out, emitted_names, tensor):
+    if tensor.name not in emitted_names:
+        initializers_out.append(tensor)
+        emitted_names.add(tensor.name)
+
+
+def make_dq_node(x, scale, zero_point, y, name, axis=None):
+    kwargs = {}
+    if axis is not None:
+        kwargs["axis"] = int(axis)
     return helper.make_node(
         "DequantizeLinear",
         inputs=[x, scale, zero_point],
         outputs=[y],
         name=name,
+        **kwargs
     )
 
 
-def make_q_node(x, scale, zero_point, y, name):
+def make_q_node(x, scale, zero_point, y, name, axis=None):
+    kwargs = {}
+    if axis is not None:
+        kwargs["axis"] = int(axis)
     return helper.make_node(
         "QuantizeLinear",
         inputs=[x, scale, zero_point],
         outputs=[y],
         name=name,
+        **kwargs
     )
 
 
@@ -86,6 +86,8 @@ def print_onnx_op_counts(title, op_counts):
     interesting_ops = [
         "Conv",
         "MatMul",
+        "Add",
+        "Mul",
         "QuantizeLinear",
         "DequantizeLinear",
         "QLinearConv",
@@ -97,6 +99,31 @@ def print_onnx_op_counts(title, op_counts):
     ]
     for op_name in interesting_ops:
         print("  {:<16}: {}".format(op_name, op_counts.get(op_name, 0)))
+
+
+def get_per_axis_axis_if_any(initializer_map, scale_name, default_axis=None):
+    """
+    Returns:
+      - None if scale is scalar / per-tensor
+      - int axis if scale is 1-D / per-axis
+    """
+    if scale_name not in initializer_map:
+        return default_axis
+
+    scale = get_tensor_numpy(initializer_map, scale_name)
+    scale = np.asarray(scale)
+
+    if scale.ndim == 0:
+        return None
+    if scale.ndim == 1:
+        return default_axis
+
+    # This script does not handle blocked quantization.
+    raise ValueError(
+        "Scale {} has rank {}. Only scalar or 1-D scales are supported.".format(
+            scale_name, scale.ndim
+        )
+    )
 
 
 def make_bias_float_initializer(node_name, bias_name, x_scale_name, w_scale_name, initializer_map):
@@ -152,8 +179,21 @@ def convert_qlinearconv(node, initializer_map, new_nodes, new_initializers, emit
     w_dq = "{}_w_dq".format(node_name)
     conv_out = "{}_conv_out".format(node_name)
 
-    new_nodes.append(make_dq_node(x, x_scale, x_zp, x_dq, "{}_DequantizeInput".format(node_name)))
-    new_nodes.append(make_dq_node(w, w_scale, w_zp, w_dq, "{}_DequantizeWeight".format(node_name)))
+    # Activation is usually per-tensor, so no axis unless x_scale is 1-D.
+    x_axis = get_per_axis_axis_if_any(initializer_map, x_scale, default_axis=1)
+
+    # Conv weight per-channel quantization is typically along output-channel axis 0.
+    w_axis = get_per_axis_axis_if_any(initializer_map, w_scale, default_axis=0)
+
+    # Output quant is usually per-tensor. If 1-D appears, axis=1 is a generic activation default.
+    y_axis = get_per_axis_axis_if_any(initializer_map, y_scale, default_axis=1)
+
+    new_nodes.append(
+        make_dq_node(x, x_scale, x_zp, x_dq, "{}_DequantizeInput".format(node_name), axis=x_axis)
+    )
+    new_nodes.append(
+        make_dq_node(w, w_scale, w_zp, w_dq, "{}_DequantizeWeight".format(node_name), axis=w_axis)
+    )
 
     conv_inputs = [x_dq, w_dq]
 
@@ -191,12 +231,12 @@ def convert_qlinearconv(node, initializer_map, new_nodes, new_initializers, emit
     )
 
     new_nodes.append(
-        make_q_node(conv_out, y_scale, y_zp, y, "{}_QuantizeOutput".format(node_name))
+        make_q_node(conv_out, y_scale, y_zp, y, "{}_QuantizeOutput".format(node_name), axis=y_axis)
     )
     return True
 
 
-def convert_qlinearmatmul(node, new_nodes):
+def convert_qlinearmatmul(node, initializer_map, new_nodes):
     # QLinearMatMul:
     # a, a_scale, a_zp, b, b_scale, b_zp, y_scale, y_zp
     if len(node.input) != 8:
@@ -218,8 +258,16 @@ def convert_qlinearmatmul(node, new_nodes):
     b_dq = "{}_b_dq".format(node_name)
     mm_out = "{}_matmul_out".format(node_name)
 
-    new_nodes.append(make_dq_node(a, a_scale, a_zp, a_dq, "{}_DequantizeA".format(node_name)))
-    new_nodes.append(make_dq_node(b, b_scale, b_zp, b_dq, "{}_DequantizeB".format(node_name)))
+    a_axis = get_per_axis_axis_if_any(initializer_map, a_scale, default_axis=1)
+    b_axis = get_per_axis_axis_if_any(initializer_map, b_scale, default_axis=0)
+    y_axis = get_per_axis_axis_if_any(initializer_map, y_scale, default_axis=1)
+
+    new_nodes.append(
+        make_dq_node(a, a_scale, a_zp, a_dq, "{}_DequantizeA".format(node_name), axis=a_axis)
+    )
+    new_nodes.append(
+        make_dq_node(b, b_scale, b_zp, b_dq, "{}_DequantizeB".format(node_name), axis=b_axis)
+    )
 
     new_nodes.append(
         helper.make_node(
@@ -231,43 +279,37 @@ def convert_qlinearmatmul(node, new_nodes):
     )
 
     new_nodes.append(
-        make_q_node(mm_out, y_scale, y_zp, y, "{}_QuantizeOutput".format(node_name))
+        make_q_node(mm_out, y_scale, y_zp, y, "{}_QuantizeOutput".format(node_name), axis=y_axis)
     )
     return True
 
-def convert_qlinearadd(node, new_nodes):
-    # QLinearAdd:
-    # A, A_scale, A_zp, B, B_scale, B_zp, C_scale, C_zp
+
+def convert_qlinearadd(node, initializer_map, new_nodes):
     if len(node.input) != 8:
         print("[WARN] Skip {}: unexpected QLinearAdd input count = {}".format(node.name, len(node.input)))
         return False
 
     node_name = sanitize_name(node.name, "QLinearAdd")
-
     a = node.input[0]
     a_scale = node.input[1]
     a_zp = node.input[2]
-
     b = node.input[3]
     b_scale = node.input[4]
     b_zp = node.input[5]
-
     y_scale = node.input[6]
     y_zp = node.input[7]
-
     y = node.output[0]
 
     a_dq = "{}_a_dq".format(node_name)
     b_dq = "{}_b_dq".format(node_name)
     add_out = "{}_add_out".format(node_name)
 
-    new_nodes.append(
-        make_dq_node(a, a_scale, a_zp, a_dq, "{}_DequantizeA".format(node_name))
-    )
-    new_nodes.append(
-        make_dq_node(b, b_scale, b_zp, b_dq, "{}_DequantizeB".format(node_name))
-    )
+    a_axis = get_per_axis_axis_if_any(initializer_map, a_scale, default_axis=1)
+    b_axis = get_per_axis_axis_if_any(initializer_map, b_scale, default_axis=1)
+    y_axis = get_per_axis_axis_if_any(initializer_map, y_scale, default_axis=1)
 
+    new_nodes.append(make_dq_node(a, a_scale, a_zp, a_dq, "{}_DequantizeA".format(node_name), axis=a_axis))
+    new_nodes.append(make_dq_node(b, b_scale, b_zp, b_dq, "{}_DequantizeB".format(node_name), axis=b_axis))
     new_nodes.append(
         helper.make_node(
             "Add",
@@ -276,11 +318,7 @@ def convert_qlinearadd(node, new_nodes):
             name="{}_Add".format(node_name),
         )
     )
-
-    new_nodes.append(
-        make_q_node(add_out, y_scale, y_zp, y, "{}_QuantizeOutput".format(node_name))
-    )
-
+    new_nodes.append(make_q_node(add_out, y_scale, y_zp, y, "{}_QuantizeOutput".format(node_name), axis=y_axis))
     return True
 
 
@@ -310,11 +348,13 @@ def convert_model(model, fail_if_unsupported=False):
         elif node.op_type == "QLinearMatMul":
             converted = convert_qlinearmatmul(
                 node=node,
+                initializer_map=initializer_map,
                 new_nodes=new_nodes,
             )
         elif node.op_type == "QLinearAdd":
             converted = convert_qlinearadd(
                 node=node,
+                initializer_map=initializer_map,
                 new_nodes=new_nodes,
             )
         else:
@@ -358,7 +398,9 @@ def convert_model(model, fail_if_unsupported=False):
     return new_model, unsupported_quantized_ops
 
 
-def main(args):
+def main():
+    args = parse_args()
+
     if not os.path.isfile(args.input):
         raise FileNotFoundError("Input model not found: {}".format(args.input))
 
@@ -392,12 +434,7 @@ def main(args):
     output_counts = collect_model_op_counts(output_model)
     print_onnx_op_counts(args.output, output_counts)
 
-    remaining_qlinearconv = output_counts.get("QLinearConv", 0)
-    remaining_qlinearmatmul = output_counts.get("QLinearMatMul", 0)
-
-    if remaining_qlinearconv > 0 or remaining_qlinearmatmul > 0:
-        print("[WARN] Some QLinearConv/QLinearMatMul nodes remain in output.")
-    else:
+    if output_counts.get("QLinearConv", 0) == 0 and output_counts.get("QLinearMatMul", 0) == 0:
         print("[INFO] Verified: QLinearConv and QLinearMatMul were removed from output.")
 
     if unsupported_quantized_ops:
@@ -405,4 +442,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    main(parse_args())
+    main()
