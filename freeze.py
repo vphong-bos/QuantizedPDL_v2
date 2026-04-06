@@ -258,6 +258,7 @@ def collect_onnx_qparams_and_tensor_metadata(model_path):
             "dims": list(init.dims),
             "data_type": int(init.data_type),
             "uses_external_data": bool(init.external_data),
+            "value": list(init.value)
         }
 
         if not init.external_data:
@@ -265,6 +266,7 @@ def collect_onnx_qparams_and_tensor_metadata(model_path):
                 arr = numpy_helper.to_array(init)
                 meta_row["dtype"] = str(arr.dtype)
                 meta_row["summary"] = summarize_array(arr)
+                meta_row["value"] = arr.tolist()
             except Exception as e:
                 meta_row["summary_error"] = str(e)
 
