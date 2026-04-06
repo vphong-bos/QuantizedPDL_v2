@@ -258,7 +258,6 @@ def collect_onnx_qparams_and_tensor_metadata(model_path):
             "dims": list(init.dims),
             "data_type": int(init.data_type),
             "uses_external_data": bool(init.external_data),
-            "value": list(init.value)
         }
 
         if not init.external_data:
