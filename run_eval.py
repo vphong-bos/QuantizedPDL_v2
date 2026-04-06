@@ -135,8 +135,7 @@ def main():
             max_samples=args.max_samples,
         )
 
-        if not args.fp32_weights:
-            print(quant_results)
+        print(quant_results)
 
         if args.fp32_weights:
             print("Evaluating PCC between FP32 and quantized outputs...")

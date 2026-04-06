@@ -233,6 +233,25 @@ def collect_onnx_qparams_and_tensor_metadata(model_path):
 
     init_map = {init.name: init for init in model.graph.initializer}
 
+    def initializer_to_full_json(init_obj):
+        info = {
+            "name": init_obj.name,
+            "dims": list(init_obj.dims),
+            "data_type": int(init_obj.data_type),
+            "uses_external_data": bool(init_obj.external_data),
+        }
+
+        if not init_obj.external_data:
+            try:
+                arr = numpy_helper.to_array(init_obj)
+                info["dtype"] = str(arr.dtype)
+                info["value"] = arr.tolist()
+                info["summary"] = summarize_array(arr)
+            except Exception as e:
+                info["value_error"] = str(e)
+
+        return info
+
     for init in model.graph.initializer:
         meta_row = {
             "name": init.name,
@@ -267,38 +286,10 @@ def collect_onnx_qparams_and_tensor_metadata(model_path):
             }
 
             if len(node.input) >= 2 and node.input[1] in init_map:
-                scale_init = init_map[node.input[1]]
-                scale_info = {
-                    "name": node.input[1],
-                    "dims": list(scale_init.dims),
-                    "data_type": int(scale_init.data_type),
-                    "uses_external_data": bool(scale_init.external_data),
-                }
-                if not scale_init.external_data:
-                    try:
-                        scale_arr = numpy_helper.to_array(scale_init)
-                        scale_info["dtype"] = str(scale_arr.dtype)
-                        scale_info["summary"] = summarize_array(scale_arr)
-                    except Exception as e:
-                        scale_info["summary_error"] = str(e)
-                entry["scale"] = scale_info
+                entry["scale"] = initializer_to_full_json(init_map[node.input[1]])
 
             if len(node.input) >= 3 and node.input[2] in init_map:
-                zp_init = init_map[node.input[2]]
-                zp_info = {
-                    "name": node.input[2],
-                    "dims": list(zp_init.dims),
-                    "data_type": int(zp_init.data_type),
-                    "uses_external_data": bool(zp_init.external_data),
-                }
-                if not zp_init.external_data:
-                    try:
-                        zp_arr = numpy_helper.to_array(zp_init)
-                        zp_info["dtype"] = str(zp_arr.dtype)
-                        zp_info["summary"] = summarize_array(zp_arr)
-                    except Exception as e:
-                        zp_info["summary_error"] = str(e)
-                entry["zero_point"] = zp_info
+                entry["zero_point"] = initializer_to_full_json(init_map[node.input[2]])
 
             qparams.append(entry)
 
