@@ -536,7 +536,7 @@ def parse_args() -> argparse.Namespace:
         "--op_types_to_quantize",
         type=str,
         nargs="*",
-        default=["Conv", "MatMul", "Relu"],
+        default=["Conv", "MatMul", "Gemm", "Relu"],
         help="Op types passed into INC static quant config.",
     )
 
