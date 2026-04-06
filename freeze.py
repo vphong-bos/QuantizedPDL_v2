@@ -81,9 +81,6 @@ def parse_args():
     parser.add_argument("--image_height", type=int, default=512)
     parser.add_argument("--image_width", type=int, default=1024)
 
-    parser.add_argument("--sample_input_npys", type=str, nargs="*", default=[],
-                        help="Optional list of .npy sample inputs used to generate reference outputs")
-
     parser.add_argument("--demo_images", type=str, required=True,
                         help="Image file or folder for demo inference")
     parser.add_argument("--demo_num_iters", type=int, default=-1,
@@ -954,17 +951,67 @@ def main():
             "warning": "Quant model is not ONNX. QParam extraction unavailable."
         }
 
-    print("[INFO] Collecting sample inputs and reference outputs...")
-    if args.sample_input_npys:
-        sample_io_index = collect_sample_io_from_files(
-            model_obj=quant_obj,
-            device=args.device,
-            sample_input_paths=args.sample_input_npys,
-            out_dir=io_dir,
-        )
-    else:
-        print("[WARN] No sample inputs provided. sample_io_index will be empty.")
-        sample_io_index = []
+    def create_sample_npys_from_demo_images(args, out_dir):
+        ensure_dir(out_dir)
+
+        images = load_images(args.demo_images, args.demo_num_iters)
+        if len(images) == 0:
+            raise ValueError(f"No valid images found in: {args.demo_images}")
+
+        rows = []
+
+        for idx, image_path in enumerate(images):
+            preprocess_device = args.device
+            if args.quant_model.endswith(".onnx") and args.onnx_provider == "CPUExecutionProvider":
+                preprocess_device = "cpu"
+
+            original_image, torch_input = preprocess_image(
+                image_path=image_path,
+                input_width=args.image_width,
+                input_height=args.image_height,
+                device=preprocess_device,
+            )
+
+            input_np = torch_input.detach().cpu().numpy().astype(np.float32, copy=False)
+
+            npy_name = "sample_{:03d}_input.npy".format(idx)
+            npy_path = os.path.join(out_dir, npy_name)
+            np.save(npy_path, input_np)
+
+            rows.append({
+                "sample_index": idx,
+                "image_path": image_path,
+                "image_name": os.path.basename(image_path),
+                "input_npy": npy_name,
+                "input_summary": summarize_array(input_np),
+            })
+
+            print(f"[INFO] Saved sample input: {npy_path}")
+
+        return rows
+
+    print("[INFO] Creating sample input NPYs from demo images...")
+    sample_input_index = create_sample_npys_from_demo_images(
+        args=args,
+        out_dir=io_dir,
+    )
+
+    generated_sample_paths = [
+        os.path.join(io_dir, row["input_npy"])
+        for row in sample_input_index
+    ]
+
+    print("[INFO] Collecting reference outputs from generated sample NPYs...")
+    sample_io_index = collect_sample_io_from_files(
+        model_obj=quant_obj,
+        device=args.device,
+        sample_input_paths=generated_sample_paths,
+        out_dir=io_dir,
+    )
+
+    for row, src in zip(sample_io_index, sample_input_index):
+        row["source_image_path"] = src["image_path"]
+        row["source_image_name"] = src["image_name"]
 
     print("[INFO] Running demo and saving visualizations...")
     demo_output_dir = args.demo_output_path
