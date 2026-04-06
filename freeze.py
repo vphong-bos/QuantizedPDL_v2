@@ -8,22 +8,51 @@ from datetime import datetime
 
 import numpy as np
 import onnx
-import onnxruntime as ort
 import torch
 from onnx import numpy_helper
 
 from model.pdl import build_model
 from quantization.quantize_function import load_aimet_quantized_model
+
 from evaluation.eval_dataset import build_eval_loader
 from evaluation.eval_metrics import evaluate_model
+
+QUANT_OP_TYPES_EXACT = {
+    "QuantizeLinear",
+    "DequantizeLinear",
+    "QLinearConv",
+    "QLinearMatMul",
+    "QLinearAdd",
+    "QLinearMul",
+    "QLinearAveragePool",
+    "QLinearGlobalAveragePool",
+    "QLinearLeakyRelu",
+    "QLinearSigmoid",
+    "QLinearSoftmax",
+    "ConvInteger",
+    "MatMulInteger",
+}
+
+QUANT_OP_KEYWORDS = (
+    "QuantizeLinear",
+    "DequantizeLinear",
+    "QLinear",
+    "Integer",
+)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Verify, evaluate, and package PDL quantization handoff artifacts."
+        description="Freeze and package PDL quantization handoff artifacts."
     )
 
     parser.add_argument("--cityscapes_root", type=str, required=True)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--max_samples", type=int, default=16)
+    parser.add_argument("--split", type=str, default="val", choices=["val", "test"])
+    parser.add_argument("--num_sample_inputs", type=int, default=3)
+
     parser.add_argument("--package_root", type=str, default="handoff_packages")
     parser.add_argument("--artifact_name", type=str, default="pdl_quant_handoff")
     parser.add_argument("--artifact_version", type=str, required=True)
@@ -37,7 +66,7 @@ def parse_args():
     )
 
     parser.add_argument("--fp32_weights", type=str, default=None,
-                        help="Path to FP32 torch weights")
+                        help="Path to FP32 torch weights for loadability check")
     parser.add_argument("--fp32_onnx", type=str, default=None,
                         help="Optional FP32 ONNX for graph diff")
     parser.add_argument("--quant_model", type=str, required=True,
@@ -47,16 +76,17 @@ def parse_args():
                         choices=["DEEPLAB_V3_PLUS", "PANOPTIC_DEEPLAB"])
     parser.add_argument("--image_height", type=int, default=512)
     parser.add_argument("--image_width", type=int, default=1024)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--max_samples", type=int, default=16)
-    parser.add_argument("--split", type=str, default="val", choices=["val", "test"])
 
-    parser.add_argument("--num_sample_inputs", type=int, default=3)
+    parser.add_argument("--sample_input_npys", type=str, nargs="*", default=[],
+                        help="Optional list of .npy sample inputs used to generate reference outputs")
+
+    parser.add_argument("--accuracy_result_json", type=str, default=None,
+                        help="Optional precomputed accuracy-vs-FP32 JSON to include in package")
+    parser.add_argument("--accuracy_note", type=str,
+                        default="Not evaluated in this freeze package",
+                        help="Freeform note when runtime evaluation is omitted")
     parser.add_argument("--notes", type=str, default="",
                         help="Optional freeform note to include in package")
-    parser.add_argument("--known_unsupported_ops", type=str, nargs="*", default=[])
-    parser.add_argument("--expected_fallback_ops", type=str, nargs="*", default=[])
 
     return parser.parse_args()
 
@@ -85,6 +115,13 @@ def copy_into_package(src_path, dst_dir):
     ensure_dir(dst_dir)
     dst_path = os.path.join(dst_dir, os.path.basename(src_path))
     shutil.copy2(src_path, dst_path)
+
+    if src_path.endswith(".onnx"):
+        src_data = src_path + "_data"
+        dst_data = dst_path + "_data"
+        if os.path.exists(src_data):
+            shutil.copy2(src_data, dst_data)
+
     return dst_path
 
 
@@ -108,51 +145,6 @@ def tensor_to_numpy(x):
     return np.asarray(x)
 
 
-def is_numeric_tensor_or_array(x):
-    if torch.is_tensor(x):
-        return x.dtype in {
-            torch.float16,
-            torch.float32,
-            torch.float64,
-            torch.int8,
-            torch.int16,
-            torch.int32,
-            torch.int64,
-            torch.uint8,
-            torch.bool,
-        }
-    if isinstance(x, np.ndarray):
-        return x.dtype.kind in ("b", "i", "u", "f")
-    return False
-
-
-def find_first_numeric_tensor(obj):
-    if torch.is_tensor(obj) or isinstance(obj, np.ndarray):
-        return obj if is_numeric_tensor_or_array(obj) else None
-
-    if isinstance(obj, dict):
-        preferred_keys = ["image", "images", "input", "inputs", "pixel_values", "img"]
-        for key in preferred_keys:
-            if key in obj:
-                found = find_first_numeric_tensor(obj[key])
-                if found is not None:
-                    return found
-        for value in obj.values():
-            found = find_first_numeric_tensor(value)
-            if found is not None:
-                return found
-        return None
-
-    if isinstance(obj, (tuple, list)):
-        for item in obj:
-            found = find_first_numeric_tensor(item)
-            if found is not None:
-                return found
-        return None
-
-    return None
-
-
 def summarize_array(arr):
     arr = np.asarray(arr)
     info = {
@@ -170,46 +162,84 @@ def summarize_array(arr):
     return info
 
 
+def is_quant_op(op_type):
+    if op_type in QUANT_OP_TYPES_EXACT:
+        return True
+    return any(keyword in op_type for keyword in QUANT_OP_KEYWORDS)
+
+
 def collect_onnx_op_inventory(model_path):
-    model = onnx.load(model_path)
+    model = onnx.load(model_path, load_external_data=False)
+
     op_counts = {}
+    quant_op_counts = {}
+    non_quant_op_counts = {}
     node_rows = []
 
+    total_nodes = len(model.graph.node)
+    quant_node_count = 0
+
     for idx, node in enumerate(model.graph.node):
-        op_counts[node.op_type] = op_counts.get(node.op_type, 0) + 1
+        op_type = node.op_type
+        op_counts[op_type] = op_counts.get(op_type, 0) + 1
+
+        quant_flag = is_quant_op(op_type)
+        if quant_flag:
+            quant_op_counts[op_type] = quant_op_counts.get(op_type, 0) + 1
+            quant_node_count += 1
+        else:
+            non_quant_op_counts[op_type] = non_quant_op_counts.get(op_type, 0) + 1
+
         node_rows.append({
             "index": idx,
             "name": node.name,
-            "op_type": node.op_type,
+            "op_type": op_type,
+            "is_quant_op": quant_flag,
             "inputs": list(node.input),
             "outputs": list(node.output),
         })
 
     return {
+        "node_count": total_nodes,
+        "quant_node_count": quant_node_count,
+        "non_quant_node_count": total_nodes - quant_node_count,
+        "quant_node_ratio": (float(quant_node_count) / float(total_nodes)) if total_nodes > 0 else 0.0,
         "op_counts": dict(sorted(op_counts.items(), key=lambda x: x[0])),
-        "node_count": len(model.graph.node),
+        "quant_op_counts": dict(sorted(quant_op_counts.items(), key=lambda x: x[0])),
+        "non_quant_op_counts": dict(sorted(non_quant_op_counts.items(), key=lambda x: x[0])),
+        "all_ops": sorted(op_counts.keys()),
+        "quant_ops": sorted(quant_op_counts.keys()),
+        "non_quant_ops": sorted(non_quant_op_counts.keys()),
         "nodes": node_rows,
     }
 
-
 def collect_onnx_qparams_and_tensor_metadata(model_path):
-    model = onnx.load(model_path)
+    model = onnx.load(model_path, load_external_data=False)
     qparams = []
     tensor_meta = []
 
     init_map = {init.name: init for init in model.graph.initializer}
 
     for init in model.graph.initializer:
-        arr = numpy_helper.to_array(init)
-        tensor_meta.append({
+        meta_row = {
             "name": init.name,
-            "shape": list(arr.shape),
-            "dtype": str(arr.dtype),
-            "summary": summarize_array(arr),
-        })
+            "dims": list(init.dims),
+            "data_type": int(init.data_type),
+            "uses_external_data": bool(init.external_data),
+        }
+
+        if not init.external_data:
+            try:
+                arr = numpy_helper.to_array(init)
+                meta_row["dtype"] = str(arr.dtype)
+                meta_row["summary"] = summarize_array(arr)
+            except Exception as e:
+                meta_row["summary_error"] = str(e)
+
+        tensor_meta.append(meta_row)
 
     for node in model.graph.node:
-        if node.op_type in ("QuantizeLinear", "DequantizeLinear"):
+        if is_quant_op(node.op_type):
             axis = None
             for attr in node.attribute:
                 if attr.name == "axis":
@@ -224,22 +254,38 @@ def collect_onnx_qparams_and_tensor_metadata(model_path):
             }
 
             if len(node.input) >= 2 and node.input[1] in init_map:
-                scale_arr = numpy_helper.to_array(init_map[node.input[1]])
-                entry["scale"] = {
+                scale_init = init_map[node.input[1]]
+                scale_info = {
                     "name": node.input[1],
-                    "shape": list(scale_arr.shape),
-                    "dtype": str(scale_arr.dtype),
-                    "summary": summarize_array(scale_arr),
+                    "dims": list(scale_init.dims),
+                    "data_type": int(scale_init.data_type),
+                    "uses_external_data": bool(scale_init.external_data),
                 }
+                if not scale_init.external_data:
+                    try:
+                        scale_arr = numpy_helper.to_array(scale_init)
+                        scale_info["dtype"] = str(scale_arr.dtype)
+                        scale_info["summary"] = summarize_array(scale_arr)
+                    except Exception as e:
+                        scale_info["summary_error"] = str(e)
+                entry["scale"] = scale_info
 
             if len(node.input) >= 3 and node.input[2] in init_map:
-                zp_arr = numpy_helper.to_array(init_map[node.input[2]])
-                entry["zero_point"] = {
+                zp_init = init_map[node.input[2]]
+                zp_info = {
                     "name": node.input[2],
-                    "shape": list(zp_arr.shape),
-                    "dtype": str(zp_arr.dtype),
-                    "summary": summarize_array(zp_arr),
+                    "dims": list(zp_init.dims),
+                    "data_type": int(zp_init.data_type),
+                    "uses_external_data": bool(zp_init.external_data),
                 }
+                if not zp_init.external_data:
+                    try:
+                        zp_arr = numpy_helper.to_array(zp_init)
+                        zp_info["dtype"] = str(zp_arr.dtype)
+                        zp_info["summary"] = summarize_array(zp_arr)
+                    except Exception as e:
+                        zp_info["summary_error"] = str(e)
+                entry["zero_point"] = zp_info
 
             qparams.append(entry)
 
@@ -247,7 +293,6 @@ def collect_onnx_qparams_and_tensor_metadata(model_path):
         "qparam_nodes": qparams,
         "initializer_tensor_metadata": tensor_meta,
     }
-
 
 def compare_onnx_graphs(fp32_onnx_path, quant_onnx_path):
     if not fp32_onnx_path or not quant_onnx_path:
@@ -268,11 +313,16 @@ def compare_onnx_graphs(fp32_onnx_path, quant_onnx_path):
             "fp32_count": fp32_ops.get(op, 0),
             "quant_count": quant_ops.get(op, 0),
             "delta": quant_ops.get(op, 0) - fp32_ops.get(op, 0),
+            "is_quant_op": is_quant_op(op),
         })
 
     return {
         "fp32_node_count": fp32_inv["node_count"],
         "quant_node_count": quant_inv["node_count"],
+        "fp32_ops": fp32_inv["all_ops"],
+        "quant_ops": quant_inv["all_ops"],
+        "quant_only_ops": sorted(set(quant_inv["all_ops"]) - set(fp32_inv["all_ops"])),
+        "fp32_only_ops": sorted(set(fp32_inv["all_ops"]) - set(quant_inv["all_ops"])),
         "op_count_diff": diff_rows,
     }
 
@@ -333,24 +383,23 @@ def run_single_backend(model_obj, image_np, device):
     raise RuntimeError("Unsupported backend: {}".format(model_obj["backend"]))
 
 
-def collect_sample_io(loader, model_obj, device, num_samples, out_dir):
+def collect_sample_io_from_files(model_obj, device, sample_input_paths, out_dir):
     ensure_dir(out_dir)
     rows = []
 
-    count = 0
-    for batch_idx, batch in enumerate(loader):
-        image = find_first_numeric_tensor(batch)
-        if image is None:
-            continue
+    for count, sample_path in enumerate(sample_input_paths):
+        image_np = np.load(sample_path)
 
-        image_np = tensor_to_numpy(image).astype(np.float32)
+        if image_np.dtype != np.float32:
+            image_np = image_np.astype(np.float32)
+
         if image_np.ndim == 3:
             image_np = np.expand_dims(image_np, axis=0)
 
         outputs = run_single_backend(model_obj, image_np, device)
 
-        input_path = os.path.join(out_dir, "sample_{:03d}_input.npy".format(count))
-        np.save(input_path, image_np)
+        input_dst = os.path.join(out_dir, "sample_{:03d}_input.npy".format(count))
+        np.save(input_dst, image_np)
 
         out_entries = []
         for out_name, out_arr in outputs.items():
@@ -365,15 +414,11 @@ def collect_sample_io(loader, model_obj, device, num_samples, out_dir):
 
         rows.append({
             "sample_index": count,
-            "loader_batch_index": batch_idx,
-            "input_path": os.path.basename(input_path),
+            "source_input_file": sample_path,
+            "input_path": os.path.basename(input_dst),
             "input_summary": summarize_array(image_np),
             "reference_outputs": out_entries,
         })
-
-        count += 1
-        if count >= num_samples:
-            break
 
     return rows
 
@@ -439,7 +484,6 @@ def inspect_torch_checkpoint(path):
         keys = list(obj.keys())
         info["top_level_keys"] = keys[:200]
 
-        # raw state_dict
         if len(keys) > 0 and all(isinstance(k, str) for k in keys):
             tensor_like_values = 0
             for v in obj.values():
@@ -452,7 +496,6 @@ def inspect_torch_checkpoint(path):
                 info["num_tensors"] = len(obj)
                 return obj, info
 
-        # checkpoint with embedded state dict
         for candidate_key in ["state_dict", "model_state_dict", "model", "network", "net"]:
             if candidate_key in obj and isinstance(obj[candidate_key], dict):
                 sd = obj[candidate_key]
@@ -514,33 +557,30 @@ def build_notes_md(manifest, accuracy_summary, graph_diff, op_inventory, args):
     if manifest["verification"]["quant_error"]:
         lines.append("- Quant load error: {}".format(manifest["verification"]["quant_error"]))
     lines.append("")
-    lines.append("## Accuracy")
+    lines.append("## Accuracy Result vs FP32 Baseline")
     if accuracy_summary is not None:
         for k, v in accuracy_summary.items():
             lines.append("- {}: {}".format(k, v))
     else:
-        lines.append("- FP32 baseline not provided, accuracy delta unavailable.")
-    lines.append("")
-    lines.append("## Known Unsupported Ops")
-    if args.known_unsupported_ops:
-        for op in args.known_unsupported_ops:
-            lines.append("- {}".format(op))
-    else:
-        lines.append("- None explicitly declared")
-    lines.append("")
-    lines.append("## Expected Fallback Ops")
-    if args.expected_fallback_ops:
-        for op in args.expected_fallback_ops:
-            lines.append("- {}".format(op))
-    else:
-        lines.append("- None explicitly declared")
+        lines.append("- Not provided")
     lines.append("")
     lines.append("## Quant Graph Summary")
     if isinstance(op_inventory, dict) and "node_count" in op_inventory:
-        lines.append("- Total quant graph nodes: {}".format(op_inventory["node_count"]))
-        lines.append("- Unique ops: {}".format(len(op_inventory["op_counts"])))
+        lines.append("- Total nodes: {}".format(op_inventory["node_count"]))
+        lines.append("- Quant nodes: {}".format(op_inventory["quant_node_count"]))
+        lines.append("- Non-quant nodes: {}".format(op_inventory["non_quant_node_count"]))
+        lines.append("- Quant node ratio: {:.6f}".format(op_inventory["quant_node_ratio"]))
+        lines.append("- Unique ops: {}".format(len(op_inventory["all_ops"])))
+        lines.append("- Unique quant ops: {}".format(len(op_inventory["quant_ops"])))
+        lines.append("- Unique non-quant ops: {}".format(len(op_inventory["non_quant_ops"])))
     else:
         lines.append("- Quant model is not ONNX, graph inventory unavailable.")
+    lines.append("")
+    lines.append("## Known Unsupported Ops")
+    lines.append("- Not auto-detected in this package. See full op inventory for backend compatibility review.")
+    lines.append("")
+    lines.append("## Expected Fallback Ops")
+    lines.append("- Not auto-detected in this package. See non-quant ops and runtime backend support matrix.")
     lines.append("")
     lines.append("## Graph Differences vs FP32")
     if graph_diff is None:
@@ -548,6 +588,8 @@ def build_notes_md(manifest, accuracy_summary, graph_diff, op_inventory, args):
     else:
         lines.append("- FP32 node count: {}".format(graph_diff["fp32_node_count"]))
         lines.append("- Quant node count: {}".format(graph_diff["quant_node_count"]))
+        lines.append("- Quant-only ops: {}".format(", ".join(graph_diff["quant_only_ops"]) if graph_diff["quant_only_ops"] else "None"))
+        lines.append("- FP32-only ops: {}".format(", ".join(graph_diff["fp32_only_ops"]) if graph_diff["fp32_only_ops"] else "None"))
         lines.append("- See `notes/graph_diff.json` for full op-level diff")
     lines.append("")
     lines.append("## Torch Checkpoint Format")
@@ -587,6 +629,7 @@ def main():
 
     verification = verify_model_loadability(args.fp32_weights, args.quant_model, args)
 
+    print("[INFO] Building evaluation loader...")
     loader = build_eval_loader(
         cityscapes_root=args.cityscapes_root,
         split=args.split,
@@ -620,14 +663,14 @@ def main():
             "model_category_const": fp32_category,
         }
 
-        # print("[INFO] Evaluating FP32 model...")
-        # fp32_results = evaluate_model(
-        #     model_obj=fp32_model_obj,
-        #     model_category_const=fp32_category,
-        #     loader=loader,
-        #     device=args.device,
-        #     max_samples=args.max_samples,
-        # )
+        print("[INFO] Evaluating FP32 model...")
+        fp32_results = evaluate_model(
+            model_obj=fp32_model_obj,
+            model_category_const=fp32_category,
+            loader=loader,
+            device=args.device,
+            max_samples=args.max_samples,
+        )
 
     print("[INFO] Loading quantized/exported model...")
     quant_obj = load_aimet_quantized_model(
@@ -637,32 +680,42 @@ def main():
         provider=args.onnx_provider,
     )
 
-    # print("[INFO] Evaluating quantized/exported model...")
-    # quant_results = evaluate_model(
-    #     model_obj=quant_obj,
-    #     model_category_const=quant_obj["model_category_const"],
-    #     loader=loader,
-    #     device=args.device,
-    #     max_samples=args.max_samples,
-    # )
+    print("[INFO] Evaluating quantized/exported model...")
+    quant_results = evaluate_model(
+        model_obj=quant_obj,
+        model_category_const=quant_obj["model_category_const"],
+        loader=loader,
+        device=args.device,
+        max_samples=args.max_samples,
+    )
 
-    # if fp32_results is not None:
-    #     accuracy_summary = {
-    #         "fp32_mIoU": fp32_results["mIoU"],
-    #         "quant_mIoU": quant_results["mIoU"],
-    #         "miou_drop": quant_results["mIoU"] - fp32_results["mIoU"],
-    #         "fp32_fps": fp32_results["FPS"],
-    #         "quant_fps": quant_results["FPS"],
-    #         "speedup_x": (
-    #             quant_results["FPS"] / fp32_results["FPS"]
-    #             if fp32_results["FPS"] != 0 else None
-    #         ),
-    #         "fp32_latency_ms": fp32_results["Avg_Inference_Time_ms"],
-    #         "quant_latency_ms": quant_results["Avg_Inference_Time_ms"],
-    #         "latency_delta_ms": (
-    #             quant_results["Avg_Inference_Time_ms"] - fp32_results["Avg_Inference_Time_ms"]
-    #         ),
-    #     }
+    if fp32_results is not None:
+        accuracy_summary = {
+            "fp32_mIoU": fp32_results["mIoU"],
+            "quant_mIoU": quant_results["mIoU"],
+            "miou_drop": quant_results["mIoU"] - fp32_results["mIoU"],
+            "fp32_fps": fp32_results["FPS"],
+            "quant_fps": quant_results["FPS"],
+            "speedup_x": (
+                quant_results["FPS"] / fp32_results["FPS"]
+                if fp32_results["FPS"] != 0 else None
+            ),
+            "fp32_latency_ms": fp32_results["Avg_Inference_Time_ms"],
+            "quant_latency_ms": quant_results["Avg_Inference_Time_ms"],
+            "latency_delta_ms": (
+                quant_results["Avg_Inference_Time_ms"] - fp32_results["Avg_Inference_Time_ms"]
+            ),
+        }
+    else:
+        accuracy_summary = {
+            "status": "fp32_baseline_not_provided",
+            "quant_mIoU": quant_results["mIoU"] if quant_results is not None else None,
+            "quant_fps": quant_results["FPS"] if quant_results is not None else None,
+            "quant_latency_ms": (
+                quant_results["Avg_Inference_Time_ms"] if quant_results is not None else None
+            ),
+            "note": args.accuracy_note,
+        }
 
     print("[INFO] Copying model assets...")
     packaged_fp32_weights = copy_into_package(args.fp32_weights, models_dir) if args.fp32_weights else None
@@ -728,13 +781,16 @@ def main():
         }
 
     print("[INFO] Collecting sample inputs and reference outputs...")
-    sample_io_index = collect_sample_io(
-        loader=loader,
-        model_obj=quant_obj,
-        device=args.device,
-        num_samples=args.num_sample_inputs,
-        out_dir=io_dir,
-    )
+    if args.sample_input_npys:
+        sample_io_index = collect_sample_io_from_files(
+            model_obj=quant_obj,
+            device=args.device,
+            sample_input_paths=args.sample_input_npys,
+            out_dir=io_dir,
+        )
+    else:
+        print("[WARN] No sample inputs provided. sample_io_index will be empty.")
+        sample_io_index = []
 
     save_json(quant_results, os.path.join(reports_dir, "quant_eval.json"))
     if fp32_results is not None:
@@ -787,13 +843,24 @@ def main():
             "quant_assets": "notes/quant_assets.json",
             "op_inventory": "notes/op_inventory.json",
             "graph_diff": "notes/graph_diff.json" if graph_diff is not None else None,
+            "accuracy_compare": "reports/accuracy_compare.json",
+            "quant_eval": "reports/quant_eval.json",
+            "fp32_eval": "reports/fp32_eval.json" if fp32_results is not None else None,
             "checkpoint_inspection": "notes/quant_checkpoint_inspection.json" if checkpoint_inspection is not None else None,
             "state_dict_info": "notes/quant_state_dict_info.json" if extracted_state_dict_info is not None else None,
         },
+        "ops_summary": {
+            "all_ops": quant_op_inventory.get("all_ops") if isinstance(quant_op_inventory, dict) else None,
+            "quant_ops": quant_op_inventory.get("quant_ops") if isinstance(quant_op_inventory, dict) else None,
+            "non_quant_ops": quant_op_inventory.get("non_quant_ops") if isinstance(quant_op_inventory, dict) else None,
+            "quant_op_counts": quant_op_inventory.get("quant_op_counts") if isinstance(quant_op_inventory, dict) else None,
+            "non_quant_op_counts": quant_op_inventory.get("non_quant_op_counts") if isinstance(quant_op_inventory, dict) else None,
+        },
         "notes": {
-            "known_unsupported_ops": args.known_unsupported_ops,
-            "expected_fallback_ops": args.expected_fallback_ops,
+            "known_unsupported_ops": [],
+            "expected_fallback_ops": [],
             "freeform_notes": args.notes,
+            "unsupported_fallback_note": "Not auto-detected. Review full op inventory against target backend support.",
         },
         "checkpoint_inspection": checkpoint_inspection,
         "state_dict_export": extracted_state_dict_info,
@@ -812,7 +879,6 @@ def main():
 
     print("[INFO] Package created successfully:")
     print(package_dir)
-
 
 if __name__ == "__main__":
     main()
