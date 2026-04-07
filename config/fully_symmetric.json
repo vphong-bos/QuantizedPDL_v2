@@ -10,7 +10,7 @@
         },
         "strict_symmetric": "False",
         "unsigned_symmetric": "False",
-        "per_channel_quantization": "False"
+        "per_channel_quantization": "True"
     },
     "params": {
         "bias": {
