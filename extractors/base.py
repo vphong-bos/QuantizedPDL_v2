@@ -351,6 +351,7 @@ class QuantizedOnnxExtractor:
     # Save
     # ------------------------------------------------------------------
 
+    #TODO: Add support for saving in other formats (e.g., PyTorch state dict, etc.)
     def save(self, output_path):
         import json
 
