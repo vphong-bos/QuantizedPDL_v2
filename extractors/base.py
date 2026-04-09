@@ -19,11 +19,13 @@ class QuantizedOnnxExtractor:
 
     COMPUTE_OPS = {"Conv", "MatMul", "Gemm"}
 
-    def __init__(self, ckpt_path):
+    def __init__(self, ckpt_path, compute_ops=None, passthrough_ops=None):
         self.ckpt_path = str(ckpt_path)
         self.onnx_model = onnx.load(self.ckpt_path)
         self.initializers = self._build_initializer_map()
         self.producer, self.consumers = self._build_graph_maps()
+        self.compute_ops = set(compute_ops) if compute_ops is not None else self.COMPUTE_OPS
+        self.passthrough_ops = set(passthrough_ops) if passthrough_ops is not None else self.PASSTHROUGH_OPS
 
     # ------------------------------------------------------------------
     # Tensor / graph helpers
@@ -80,9 +82,9 @@ class QuantizedOnnxExtractor:
                 continue
             seen.add(tensor)
             for consumer in self.consumers.get(tensor, []):
-                if consumer.op_type in self.COMPUTE_OPS:
+                if consumer.op_type in self.compute_ops:
                     return consumer
-                if consumer.op_type in self.PASSTHROUGH_OPS:
+                if consumer.op_type in self.passthrough_ops:
                     queue.extend(consumer.output)
         return None
 
@@ -95,8 +97,6 @@ class QuantizedOnnxExtractor:
         }
         for inp in compute_node.input:
             if any(inp.startswith(r) for r in weight_roots):
-                continue
-            if f"{weight_prefix}.weight" in inp:
                 continue
             return inp
         if compute_node.op_type == "Conv":

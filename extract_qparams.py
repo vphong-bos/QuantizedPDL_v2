@@ -42,7 +42,6 @@ class QuantizedOnnxExtractor:
 
     @classmethod
     def _normalize_prefix(self, name):
-        # remove repeated wrappers like model.model.model...
         while name.startswith("model."):
             name = name[len("model.") :]
 
@@ -108,6 +107,9 @@ class QuantizedOnnxExtractor:
             f"{weight_prefix}.weight_qdq",
             f"{weight_prefix}.weight_q",
             f"{weight_prefix}.weight",
+            f"{weight_prefix}.bias_qdq",
+            f"{weight_prefix}.bias_q",
+            f"{weight_prefix}.bias",
         }
 
         for input_name in compute_node.input:
@@ -193,6 +195,7 @@ class QuantizedOnnxExtractor:
                 state_dict[f"{export_prefix}.bias_zeropoint"] = self._to_torch_tensor(self.initializers[bias_zero_point_name])
 
             compute_node = self._find_compute_node_from_weight_qdq(f"{prefix}.weight_qdq")
+            print(f"{prefix}.weight_qdq's compute node: {compute_node}")
             if compute_node is None:
                 missing_input_qparams.append(prefix)
                 missing_output_qparams.append(prefix)
