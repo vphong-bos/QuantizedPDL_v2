@@ -1,2 +1,7 @@
 fp32_model
 int8_model
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
