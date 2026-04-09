@@ -728,6 +728,16 @@ def main(args):
 
         print(f"Exported QDQ ONNX to: {onnx_path}")
 
+        sim_export_dir = f"{args.export_path}/sim_export"
+        os.makedirs(sim_export_dir, exist_ok=True)
+        print(f"Exporting AIMET artifacts to: {sim_export_dir}")
+        sim.export(
+            path=sim_export_dir,
+            filename_prefix=args.export_prefix,
+            dummy_input=dummy_input,
+        )
+        print("AIMET export completed successfully.")
+
     # if not args.no_operation_orient:
     #     print("Exporting operation orient quantized model to ONNX QDQ...")
     #     sim.model.cpu().eval()
