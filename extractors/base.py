@@ -109,7 +109,11 @@ class QuantizedOnnxExtractor:
         upstream_ops = {
             "Transpose", "Reshape", "Identity", "Cast", "Flatten",
             "Squeeze", "Unsqueeze", "GlobalAveragePool", "AveragePool",
-            "MaxPool", "Relu", "Clip", "Concat"
+            "MaxPool", "Relu", "Clip", "Concat",
+            "ReduceMean", "ReduceSum", "Shape", "Gather",
+            "Add", "Mul", "Sub", "Div", "Tile", "Expand",
+            "Pad", "Slice", "Where", "Constant", "ConstantOfShape",
+            "GridSampleBilinearZerosAC0", "ScatterND", "Softmax",
         }
         visited = set()
         queue = [tensor_name]
@@ -162,6 +166,28 @@ class QuantizedOnnxExtractor:
                             "zeropoint": self._to_torch_tensor(self.initializers[zp]),
                         }
                 if consumer.op_type in downstream_ops:
+                    queue.extend(consumer.output)
+        return None
+
+    def _find_output_quant_params_via_weight_path(self, prefix):
+        """Fallback for layers where weight_qdq is used as a scale path ending in QuantizeLinear."""
+        weight_tensor_name = f"{prefix}.weight_qdq"
+        visited = set()
+        queue = [weight_tensor_name]
+        while queue:
+            tensor = queue.pop(0)
+            if tensor in visited:
+                continue
+            visited.add(tensor)
+            for consumer in self.consumers.get(tensor, []):
+                if consumer.op_type == "QuantizeLinear" and len(consumer.input) >= 3:
+                    s, zp = consumer.input[1], consumer.input[2]
+                    if s in self.initializers and zp in self.initializers:
+                        return {
+                            "scale": self._to_torch_tensor(self.initializers[s]),
+                            "zeropoint": self._to_torch_tensor(self.initializers[zp]),
+                        }
+                if consumer.op_type in self.passthrough_ops:
                     queue.extend(consumer.output)
         return None
 
@@ -301,16 +327,13 @@ class QuantizedOnnxExtractor:
             if compute_node is None:
                 if "input" in roles:
                     missing_input.append(prefix)
-                if "output" in roles:
-                    missing_output.append(prefix)
-                continue
+                # for output, try fallback below
 
             layer_act = {}
 
-            if "input" in roles:
+            if "input" in roles and compute_node is not None:
                 act_inp = self._find_activation_input_name(compute_node, prefix)
                 qp = self._extract_qparams_from_dq_tensor(act_inp) if act_inp else None
-                # print(f"Debug: prefix={prefix}, act_inp={act_inp}, has_qp={qp is not None}")
                 if qp:
                     layer_act["input"] = {
                         "0": self._qparams_to_aimet_encoding(qp["scale"], qp["zeropoint"])
@@ -319,7 +342,11 @@ class QuantizedOnnxExtractor:
                     missing_input.append(prefix)
 
             if "output" in roles:
-                qp = self._find_output_quant_params(prefix, compute_node)
+                qp = None
+                if compute_node is not None:
+                    qp = self._find_output_quant_params(prefix, compute_node)
+                else:
+                    qp = self._find_output_quant_params_via_weight_path(prefix)
                 if qp:
                     layer_act["output"] = {
                         "0": self._qparams_to_aimet_encoding(qp["scale"], qp["zeropoint"])

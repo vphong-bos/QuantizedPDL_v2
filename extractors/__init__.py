@@ -2,6 +2,7 @@ from .base import QuantizedOnnxExtractor
 from .resnet import ResNetExtractor
 from .ssr import SSRExtractor
 from .pdl import PDLExtractor
+from .vit import ViTExtractor
 
 MODEL_REGISTRY = {
     "resnet50": ResNetExtractor,
@@ -9,6 +10,7 @@ MODEL_REGISTRY = {
     "resnet152": ResNetExtractor,
     "ssr": SSRExtractor,
     "pdl": PDLExtractor,
+    "vit": ViTExtractor,
 }
 
 
