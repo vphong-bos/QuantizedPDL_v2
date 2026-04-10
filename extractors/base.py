@@ -225,12 +225,11 @@ class QuantizedOnnxExtractor:
 
         def one_encoding(s, zp):
             zp, s = int(zp), float(s)
-            if zp == 0:
-                dtype, qmin, qmax, is_sym = "int", -128, 127, "True"
-            elif zp == 128:
-                dtype, qmin, qmax, is_sym = "uint", 0, 255, "True"
+            if zp == 0 or zp == 128:
+                zp = 128  # normalize symmetric to zp=128
+                dtype, qmin, qmax, is_sym = "int", 0, 255, "True"
             else:
-                dtype, qmin, qmax, is_sym = "uint", 0, 255, "False"
+                dtype, qmin, qmax, is_sym = "int", -128, 128, "False"
             return {
                 "bitwidth": 8,
                 "dtype": dtype,
