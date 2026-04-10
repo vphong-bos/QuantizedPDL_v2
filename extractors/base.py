@@ -109,7 +109,7 @@ class QuantizedOnnxExtractor:
         upstream_ops = {
             "Transpose", "Reshape", "Identity", "Cast", "Flatten",
             "Squeeze", "Unsqueeze", "GlobalAveragePool", "AveragePool",
-            "MaxPool", "Relu", "Clip",
+            "MaxPool", "Relu", "Clip", "Concat"
         }
         visited = set()
         queue = [tensor_name]
@@ -310,6 +310,7 @@ class QuantizedOnnxExtractor:
             if "input" in roles:
                 act_inp = self._find_activation_input_name(compute_node, prefix)
                 qp = self._extract_qparams_from_dq_tensor(act_inp) if act_inp else None
+                # print(f"Debug: prefix={prefix}, act_inp={act_inp}, has_qp={qp is not None}")
                 if qp:
                     layer_act["input"] = {
                         "0": self._qparams_to_aimet_encoding(qp["scale"], qp["zeropoint"])

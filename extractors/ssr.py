@@ -31,7 +31,6 @@ from .base import QuantizedOnnxExtractor
 
 
 class SSRExtractor(QuantizedOnnxExtractor):
-
     def __init__(self, ckpt_path):
         # Extend passthrough ops to include arithmetic ops used in norm layer parameterization
         super().__init__(ckpt_path)
@@ -43,6 +42,12 @@ class SSRExtractor(QuantizedOnnxExtractor):
             "Constant", "ConstantOfShape",  # Constants used in paths
             "Where", "RoiAlign", "Pad", "Slice", "Resize",  # Other ops
         }
+
+    def _get_activation_roles(self, export_prefix):
+        if export_prefix == "pts_bbox_head.navi_se.mlp_reduce":
+            return {"output"}
+
+        return set()
 
     def _find_compute_node_from_weight_qdq(self, weight_tensor_name):
         """Override to include LayerNormalization, InstanceNormalization, and Gather as compute ops for SSR."""
