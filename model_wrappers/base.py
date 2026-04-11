@@ -131,13 +131,18 @@ class QuantModelWrapper(nn.Module):
         act_keys = list(self.activation_encodings.keys())
         return act_keys[:limit] if limit < len(act_keys) else act_keys
 
-    def get_param_encoding(self, param_name: str) -> Dict[str, Any]:
-        enc_list = self.param_encodings.get(param_name)
-        if enc_list is None:
+    def get_param_encoding(self, param_name: str):
+        enc = self.param_encodings.get(param_name)
+        if enc is None:
             raise KeyError(f"No encoding found for param: {param_name}")
-        if not isinstance(enc_list, list) or len(enc_list) == 0:
-            raise ValueError(f"Invalid encoding for param: {param_name}")
-        return enc_list
+
+        if isinstance(enc, dict):
+            return enc
+
+        if isinstance(enc, list) and len(enc) > 0 and all(isinstance(item, dict) for item in enc):
+            return enc
+
+        raise ValueError(f"Invalid encoding for param: {param_name}")
 
     def get_activation_encoding(self, act_name: str) -> Dict[str, Any]:
         enc = self.activation_encodings.get(act_name)
@@ -219,24 +224,34 @@ class QuantModelWrapper(nn.Module):
         state_dict = self.model.state_dict() if hasattr(self.model, "state_dict") else self.model
 
         for name, tensor in state_dict.items():
-            enc_list = self.param_encodings.get(name)
+            enc = self.param_encodings.get(name)
 
-            # No encoding -> keep original float tensor
-            if enc_list is None:
-                q_state[name] = tensor
-                continue
-
-            # Unsupported / malformed encoding -> skip safely
-            if not isinstance(enc_list, list) or len(enc_list) == 0:
-                print(f"[WARN] Skipping unsupported param encoding for: {name}")
+            # no encoding -> keep original
+            if enc is None:
                 q_state[name] = tensor
                 continue
 
             try:
-                if len(enc_list) == 1:
-                    q_state[name] = self._map_per_tensor_qparams(tensor, enc_list[0])
+                # per-tensor encoding: single dict
+                if isinstance(enc, dict):
+                    q_state[name] = self._map_per_tensor_qparams(tensor, enc)
+                    print(f"[INFO] Added QParams to: {name}")
+                elif isinstance(enc, list) and len(enc) > 0 and all(isinstance(item, dict) for item in enc):
+                    if tensor.shape[0] != len(enc):
+                        print(
+                            f"[WARN] Channel mismatch for {name}: "
+                            f"tensor.shape[0]={tensor.shape[0]} vs encodings={len(enc)}. "
+                            f"Keeping original tensor."
+                        )
+                        q_state[name] = tensor
+                    else:
+                        q_state[name] = self._map_per_channel_qparams(tensor, enc)
+
+                    print(f"[INFO] Added QParams to: {name}")
                 else:
-                    q_state[name] = self._map_per_channel_qparams(tensor, enc_list)
+                    print(f"[WARN] Skipping unsupported param encoding for: {name}")
+                    q_state[name] = tensor
+
             except Exception as e:
                 print(f"[WARN] Failed to quantize param {name}: {e}. Keeping original tensor.")
                 q_state[name] = tensor
