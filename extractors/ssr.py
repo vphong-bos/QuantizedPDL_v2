@@ -2,9 +2,6 @@
     SSR model extractor (handles norm layers, attention components, embeddings).
 """
 
-# Missing output qparams (1):
-#   - model.pts_bbox_head.tokenlearner.layer_norm
-
 from .base import QuantizedOnnxExtractor
 
 
