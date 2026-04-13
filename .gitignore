@@ -1,5 +1,10 @@
 fp32_model
 int8_model
+setup_env.sh
+setup_data.sh
+model_wrappers/model/ssr/data
+model_wrappers/model/ssr/py310_ssr
+enable_ssr.sh
 
 __pycache__/
 *.pyc

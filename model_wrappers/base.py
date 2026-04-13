@@ -11,13 +11,11 @@ class ActivationQuantWrapper(nn.Module):
         module: nn.Module,
         encoding_name: str,
         activation_encodings: dict,
-        debug_activation_quant: bool = False,
     ):
         super().__init__()
         self.module = module
         self.encoding_name = encoding_name
         self.activation_encodings = activation_encodings
-        self.debug_activation_quant = debug_activation_quant
 
     def __getattr__(self, name):
         try:
@@ -34,29 +32,15 @@ class ActivationQuantWrapper(nn.Module):
             return -(2 ** (bitwidth - 1)), (2 ** (bitwidth - 1)) - 1
         return 0, (2 ** bitwidth) - 1
 
-    def _debug_tensor(self, x: torch.Tensor):
-        if not self.debug_activation_quant:
-            return
-
-        with torch.no_grad():
-            shape = tuple(x.shape)
-            xmin = float(x.min().item()) if x.numel() > 0 else 0.0
-            xmax = float(x.max().item()) if x.numel() > 0 else 0.0
-
-        print(
-            f"[ACT-Q DEBUG] {self.encoding_name} "
-            f"shape={shape} min={xmin:.6f} max={xmax:.6f}"
-        )
-
     def quantize_activation(self, x: torch.Tensor):
         enc_info = self.activation_encodings.get(self.encoding_name)
         if enc_info is None:
-            raise KeyError(f"Missing activation encoding: {self.encoding_name}")
+            return x
 
         output_info = enc_info.get("output", {})
         if "0" not in output_info:
-            raise KeyError(f"Missing output[0] encoding for: {self.encoding_name}")
-
+            return x
+        
         enc = output_info["0"]
 
         scale = float(enc["scale"])
@@ -71,14 +55,12 @@ class ActivationQuantWrapper(nn.Module):
 
     def _quantize_output(self, out):
         if isinstance(out, torch.Tensor):
-            self._debug_tensor(out)
             return self.quantize_activation(out)
 
         if isinstance(out, tuple):
             new_out = []
             for item in out:
                 if isinstance(item, torch.Tensor):
-                    self._debug_tensor(item)
                     new_out.append(self.quantize_activation(item))
                 else:
                     new_out.append(item)
@@ -88,7 +70,6 @@ class ActivationQuantWrapper(nn.Module):
             new_out = []
             for item in out:
                 if isinstance(item, torch.Tensor):
-                    self._debug_tensor(item)
                     new_out.append(self.quantize_activation(item))
                 else:
                     new_out.append(item)
@@ -102,7 +83,7 @@ class ActivationQuantWrapper(nn.Module):
 
 class QuantModelWrapper(nn.Module):
     #TODO: Add support for loading and converting from various checkpoint formats (e.g., ONNX, etc.)
-    def __init__(self, model, encodings_path, debug_activation_quant):
+    def __init__(self, model, encodings_path):
         assert model, "Model cannot be empty."
         assert encodings_path, "Encodings path cannot be empty."
 
@@ -113,8 +94,6 @@ class QuantModelWrapper(nn.Module):
         self.encodings = None
         self.param_encodings = None
         self.activation_encodings = None
-        
-        self.debug_activation_quant = debug_activation_quant
 
         self._load_encodings()
         print(f"Loaded encodings from: {self.encodings_path}")
@@ -191,6 +170,11 @@ class QuantModelWrapper(nn.Module):
         q = torch.round(x / scale) + zero_point
         q = torch.clamp(q, qmin, qmax)
         return q.to(dtype)
+        # qmin, qmax, _ = QuantModelWrapper._get_qrange(bitwidth, signed)
+        # q = torch.round(x / scale) + zero_point
+        # q = torch.clamp(q, qmin, qmax)
+        # dq = (q - zero_point) * scale
+        # return dq.to(x.dtype)
 
     # -------------------------
     # PARAMETER QUANTIZATION
@@ -226,18 +210,30 @@ class QuantModelWrapper(nn.Module):
         for name, tensor in state_dict.items():
             enc = self.param_encodings.get(name)
 
-            # no encoding -> keep original
+            if "latent" in name:
+                print(name)
+
             if enc is None:
                 q_state[name] = tensor
                 continue
 
             try:
-                # per-tensor encoding: single dict
+                # Case 1: per-tensor encoding stored as a dict
                 if isinstance(enc, dict):
                     q_state[name] = self._map_per_tensor_qparams(tensor, enc)
-                    print(f"[INFO] Added QParams to: {name}")
-                elif isinstance(enc, list) and len(enc) > 0 and all(isinstance(item, dict) for item in enc):
-                    if tensor.shape[0] != len(enc):
+                    # print(f"[INFO] Added QParams to: {name}")
+
+                # Case 2: AIMET often stores per-tensor encoding as a list with one dict
+                elif isinstance(enc, list) and len(enc) == 1 and isinstance(enc[0], dict):
+                    q_state[name] = self._map_per_tensor_qparams(tensor, enc[0])
+                    # print(f"[INFO] Added QParams to: {name}")
+
+                # Case 3: real per-channel encoding
+                elif isinstance(enc, list) and len(enc) > 1 and all(isinstance(item, dict) for item in enc):
+                    if tensor.ndim == 0:
+                        print(f"[WARN] Scalar tensor cannot use per-channel encoding for: {name}. Keeping original tensor.")
+                        q_state[name] = tensor
+                    elif tensor.shape[0] != len(enc):
                         print(
                             f"[WARN] Channel mismatch for {name}: "
                             f"tensor.shape[0]={tensor.shape[0]} vs encodings={len(enc)}. "
@@ -246,8 +242,8 @@ class QuantModelWrapper(nn.Module):
                         q_state[name] = tensor
                     else:
                         q_state[name] = self._map_per_channel_qparams(tensor, enc)
+                        # print(f"[INFO] Added QParams to: {name}")
 
-                    print(f"[INFO] Added QParams to: {name}")
                 else:
                     print(f"[WARN] Skipping unsupported param encoding for: {name}")
                     q_state[name] = tensor
@@ -307,6 +303,10 @@ class QuantModelWrapper(nn.Module):
     def add_activation_quant_wrapper(self):
         module_dict = dict(self.model.named_modules())
 
+        # for k in module_dict:
+        #     if "latent_world_model" in k:
+        #         print(k, "->", type(module_dict[k]))
+
         for encoding_name in self.activation_encodings.keys():
             module_name = self._normalize_encoding_name(encoding_name)
 
@@ -325,10 +325,4 @@ class QuantModelWrapper(nn.Module):
             self._replace_module(self.model, module_name, wrapped_module)
             module_dict = dict(self.model.named_modules())
 
-            print(f"[INFO] Added ActivationQuantWrapper to: {module_name}")
-
-
-        
-    # -------------------------
-    # DEBUG
-    # -------------------------
+            # print(f"[INFO] Added ActivationQuantWrapper to: {module_name}")
