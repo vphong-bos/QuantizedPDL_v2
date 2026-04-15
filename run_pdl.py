@@ -70,7 +70,7 @@ def load_model(args):
     if ext == ".onnx":
         print("Loading ONNX model...")
         so = ort.SessionOptions()
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
 
         session = ort.InferenceSession(
             args.weights_path,
