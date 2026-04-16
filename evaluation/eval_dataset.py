@@ -97,7 +97,7 @@ class EvalDataset(Dataset):
         resized = resized.astype(np.float32) / 255.0
 
         # Explicit ImageNet normalization
-        resized = (resized - self.mean) / self.std
+        # resized = (resized - self.mean) / self.std
 
         # HWC -> CHW
         image_tensor = torch.from_numpy(resized).permute(2, 0, 1).contiguous()

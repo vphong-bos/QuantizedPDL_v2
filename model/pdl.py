@@ -197,7 +197,7 @@ class PytorchPanopticDeepLab(nn.Module):
             # This is the single point where normalization fusion happens
             from model.preprocessing import fuse_imagenet_normalization
 
-            # fuse_imagenet_normalization(self)
+            fuse_imagenet_normalization(self)
         except Exception as e:
             logger.error(f"Failed to load weights from {weights_path}: {e}")
             raise

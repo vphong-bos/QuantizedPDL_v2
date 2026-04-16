@@ -25,20 +25,17 @@ def normalize_logits_output(output):
     if isinstance(output, torch.Tensor):
         return output
 
-    if isinstance(output, (list, tuple)):
-        # usually first element is the main segmentation logits
-        output = output[0]
-
     if isinstance(output, dict):
-        if "out" in output:
-            output = output["out"]
-        else:
-            output = next(iter(output.values()))
+        for key in ["semantic", "sem_seg", "out"]:
+            if key in output:
+                return output[key]
+        raise KeyError(f"Cannot find semantic logits in dict keys: {list(output.keys())}")
 
-    if not isinstance(output, torch.Tensor):
-        raise TypeError(f"Expected Tensor after unwrapping, got {type(output)}")
+    if isinstance(output, (list, tuple)):
+        # only safe if you know index 0 is semantic
+        return output[0]
 
-    return output
+    raise TypeError(f"Expected Tensor after unwrapping, got {type(output)}")
 
 def get_semantic_logits(model_obj, image, model_category_const):
     backend = model_obj["backend"]
@@ -50,9 +47,9 @@ def get_semantic_logits(model_obj, image, model_category_const):
 
         start_time = time.perf_counter()
         output = model_obj["model"](image)
-        end_time = time.perf_counter()
         if use_cuda:
             torch.cuda.synchronize()
+        end_time = time.perf_counter()
 
         logits = normalize_logits_output(output)
         inference_time = end_time - start_time
@@ -72,20 +69,17 @@ def get_semantic_logits(model_obj, image, model_category_const):
         end_time = time.perf_counter()
 
         logits = torch.from_numpy(outputs[0]).float()
-
-        if logits.ndim == 4 and logits.shape[1] != 19 and logits.shape[-1] == 19:
-            logits = logits.permute(0, 3, 1, 2).contiguous()
-
-        inference_time = end_time - start_time
-        return logits, inference_time
-
-    raise ValueError(f"Unsupported backend: {backend}")
+        return logits, end_time - start_time
 
 def update_confusion_matrix(conf_mat, pred, target, num_classes=19, ignore_index=255):
     if pred.device != target.device:
         pred = pred.to(target.device)
 
-    valid = target != ignore_index
+    valid = (
+        (target != ignore_index) &
+        (target >= 0) & (target < num_classes) &
+        (pred >= 0) & (pred < num_classes)
+    )
     pred = pred[valid]
     target = target[valid]
 
@@ -95,7 +89,6 @@ def update_confusion_matrix(conf_mat, pred, target, num_classes=19, ignore_index
     inds = num_classes * target + pred
     conf_mat += torch.bincount(inds, minlength=num_classes ** 2).reshape(num_classes, num_classes)
     return conf_mat
-
 
 def compute_miou_from_confmat(conf_mat):
     conf_mat = conf_mat.float()

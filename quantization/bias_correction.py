@@ -13,7 +13,6 @@ def copy_biases(src_model, dst_model):
         dst_module = dst_modules[name]
 
         src_bias = getattr(src_module, "bias", None)
-        dst_bias = getattr(dst_module, "bias", None)
 
         # Handle AIMET wrapped modules if needed
         if src_bias is None and hasattr(src_module, "_module_to_wrap"):
