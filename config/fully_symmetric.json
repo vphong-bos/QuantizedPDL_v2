@@ -8,7 +8,7 @@
             "is_quantized": "True",
             "is_symmetric": "True"
         },
-        "strict_symmetric": "True",
+        "strict_symmetric": "False",
         "unsigned_symmetric": "False",
         "per_channel_quantization": "True"
     },

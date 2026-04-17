@@ -582,13 +582,13 @@ def main(args):
             modules_to_ignore=None,
         )
 
-        analyzer.analyze(
-            quant_scheme=args.quant_scheme,
-            default_param_bw=args.default_param_bw,
-            default_output_bw=args.default_output_bw,
-            config_file=args.config_file,
-            results_dir=args.quant_analyzer_dir,
-        )
+        # analyzer.analyze(
+        #     quant_scheme=args.quant_scheme,
+        #     default_param_bw=args.default_param_bw,
+        #     default_output_bw=args.default_output_bw,
+        #     config_file=args.config_file,
+        #     results_dir=args.quant_analyzer_dir,
+        # )
 
         # print(f"QuantAnalyzer results saved to: {args.quant_analyzer_dir}")
 
