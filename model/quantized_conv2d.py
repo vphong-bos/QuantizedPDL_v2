@@ -1,5 +1,6 @@
 import torch
 from aimet_torch.v2.nn import QuantizationMixin
+from aimet_torch.v2.quantization.affine import QuantizeDequantize
 from model.conv2d import Conv2d
 
 
@@ -8,65 +9,37 @@ class QuantizedConv2d(QuantizationMixin, Conv2d):
     def __quant_init__(self):
         super().__quant_init__()
 
+        # One input, one output for Conv2d
         self.input_quantizers = torch.nn.ModuleList([None])
         self.output_quantizers = torch.nn.ModuleList([None])
 
         if not hasattr(self, "param_quantizers") or self.param_quantizers is None:
             raise RuntimeError("AIMET did not initialize param_quantizers")
 
-        # bias off
+        # Disable bias quantization
         if "bias" in self.param_quantizers:
             self.param_quantizers["bias"] = None
 
-        # weight quantizer must exist
         if "weight" not in self.param_quantizers:
             raise RuntimeError(
                 f"weight quantizer missing. keys={list(self.param_quantizers.keys())}"
             )
 
-        wq = self.param_quantizers["weight"]
-        self._try_make_weight_quantizer_per_channel(wq)
+        # Conv2d weight is [out_ch, in_ch, kH, kW]
+        if self.weight.ndim != 4:
+            raise RuntimeError(
+                f"Expected 4D conv weight, got shape={tuple(self.weight.shape)}"
+            )
 
-    def _try_make_weight_quantizer_per_channel(self, wq):
-        changed = []
+        out_ch = int(self.weight.shape[0])
 
-        if hasattr(wq, "per_channel"):
-            try:
-                wq.per_channel = True
-                changed.append("per_channel=True")
-            except Exception:
-                pass
-
-        if hasattr(wq, "channel_axis"):
-            try:
-                wq.channel_axis = 0
-                changed.append("channel_axis=0")
-            except Exception:
-                pass
-
-        if hasattr(wq, "encoding_analyzer"):
-            ea = wq.encoding_analyzer
-            if hasattr(ea, "channel_axis"):
-                try:
-                    ea.channel_axis = 0
-                    changed.append("encoding_analyzer.channel_axis=0")
-                except Exception:
-                    pass
-
-        if hasattr(wq, "shape"):
-            out_ch = int(self.weight.shape[0])
-            try:
-                wq.shape = (out_ch, 1, 1, 1)
-                changed.append(f"shape=({out_ch},1,1,1)")
-            except Exception:
-                pass
-
-        if not changed:
-            print("[WARN] Could not force per-channel.")
-            print("[WARN] weight quantizer type:", type(wq))
-            print("[WARN] attrs:", getattr(wq, "__dict__", {}))
-        else:
-            print("[INFO] Updated weight quantizer:", ", ".join(changed))
+        # Replace the default weight quantizer with an explicit per-channel QDQ quantizer.
+        # shape=(out_ch,1,1,1) means one encoding per output channel.
+        self.param_quantizers["weight"] = QuantizeDequantize(
+            shape=(out_ch, 1, 1, 1),
+            bitwidth=8,
+            symmetric=True,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.input_quantizers[0] is not None:
