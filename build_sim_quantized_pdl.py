@@ -380,6 +380,8 @@ def main(args):
 
             debug_remaining_custom_conv_with_bn(model, max_items=20)
 
+    torch.save(model.state_dict(), "model.pth")
+
     print("Collecting calibration images...")
     all_calib_images = load_images(args.calib_images, num_iters=-1, recursive=True)
     calib_images = sample_calibration_images(all_calib_images, args.num_calib, args.seed)
