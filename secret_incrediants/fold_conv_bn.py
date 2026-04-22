@@ -125,7 +125,8 @@ def fold_custom_conv_bn_inplace(module: nn.Module, prefix: str = ""):
         with torch.no_grad():
             _fold_bn_into_conv_params(real_conv, norm)
 
-        child.norm = nn.Identity()
+        # child.norm = nn.Identity()
+        child.norm = None
         folded += 1
 
     return folded, skipped
