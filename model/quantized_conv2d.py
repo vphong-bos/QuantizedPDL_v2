@@ -35,11 +35,13 @@ class QuantizedConv2d(QuantizationMixin, Conv2d):
 
         # Replace the default weight quantizer with an explicit per-channel QDQ quantizer.
         # shape=(out_ch,1,1,1) means one encoding per output channel.
+        device = self.weight.device
+
         self.param_quantizers["weight"] = QuantizeDequantize(
             shape=(out_ch, 1, 1, 1),
             bitwidth=8,
             symmetric=True,
-        )
+        ).to(device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.input_quantizers[0] is not None:
