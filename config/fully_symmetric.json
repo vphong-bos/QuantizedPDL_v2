@@ -29,7 +29,9 @@
     }
   },
   "supergroups": [
-    { "op_list": ["Conv", "Relu"] }
+    { "op_list": ["Conv", "Relu"] },
+    { "op_list": ["Conv", "BatchNormalization", "Relu"] },
+    { "op_list": ["Conv", "Identity", "Relu"] }
   ],
   "model_input": {
     "is_input_quantized": "True"
