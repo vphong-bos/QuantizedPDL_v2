@@ -42,26 +42,45 @@ class StemBlock(nn.Module):
         self.relu2 = nn.ReLU(inplace=True)
         self.relu3 = nn.ReLU(inplace=True)
 
+    # def forward(self, x: torch.Tensor) -> torch.Tensor:
+    #     # Conv1 + BatchNorm + ReLU
+    #     x = self.conv1(x)
+    #     x = self.conv1.norm(x)
+    #     # x = F.relu(x)
+    #     x = self.relu1(x)
+
+    #     # Conv2 + BatchNorm + ReLU
+    #     x = self.conv2(x)
+    #     x = self.conv2.norm(x)
+    #     # x = F.relu(x)
+    #     x = self.relu2(x)
+
+    #     # Conv3 + BatchNorm + ReLU
+    #     x = self.conv3(x)
+    #     x = self.conv3.norm(x)
+    #     # x = F.relu(x)
+    #     x = self.relu3(x)
+        
+    #     # Max pooling with kernel_size=3, stride=2, padding=1
+    #     x = self.maxpool(x)
+
+    #     return x
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Conv1 + BatchNorm + ReLU
         x = self.conv1(x)
-        x = self.conv1.norm(x)
-        # x = F.relu(x)
+        if self.conv1.norm is not None:
+            x = self.conv1.norm(x)
         x = self.relu1(x)
 
-        # Conv2 + BatchNorm + ReLU
         x = self.conv2(x)
-        x = self.conv2.norm(x)
-        # x = F.relu(x)
+        if self.conv2.norm is not None:
+            x = self.conv2.norm(x)
         x = self.relu2(x)
 
-        # Conv3 + BatchNorm + ReLU
         x = self.conv3(x)
-        x = self.conv3.norm(x)
-        # x = F.relu(x)
+        if self.conv3.norm is not None:
+            x = self.conv3.norm(x)
         x = self.relu3(x)
-        
-        # Max pooling with kernel_size=3, stride=2, padding=1
-        x = self.maxpool(x)
 
+        x = self.maxpool(x)
         return x
