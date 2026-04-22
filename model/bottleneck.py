@@ -52,7 +52,10 @@ class BottleneckBlock(nn.Module):
             self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=shortcut_stride, bias=False)
             self.shortcut.norm = nn.SyncBatchNorm(out_channels, eps=1e-05, momentum=0.1)
 
-        self.relu = nn.ReLU(inplace=True)
+        # self.relu = nn.ReLU(inplace=True)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.relu3 = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
@@ -63,11 +66,13 @@ class BottleneckBlock(nn.Module):
 
         out = self.conv1(x)
         out = self.conv1.norm(out)
-        out = self.relu(out)
+        # out = self.relu(out)
+        out = self.relu1(out)
 
         out = self.conv2(out)
         out = self.conv2.norm(out)
-        out = self.relu(out)
+        # out = self.relu(out)
+        out = self.relu2(out)
 
         out = self.conv3(out)
         out = self.conv3.norm(out)
@@ -75,5 +80,6 @@ class BottleneckBlock(nn.Module):
         if self.has_shortcut or self.can_add_identity:
             out = out + identity
 
-        out = self.relu(out)
+        # out = self.relu(out)
+        out = self.relu3(out)
         return out
