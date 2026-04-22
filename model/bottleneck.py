@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class BottleneckBlock(nn.Module):
     """
     PyTorch implementation of BottleneckBlock for ResNet.
@@ -26,9 +27,6 @@ class BottleneckBlock(nn.Module):
         super().__init__()
         self.has_shortcut = has_shortcut
 
-        # Static residual decision for non-shortcut case
-        # For this block, spatial size is preserved only when stride == 1,
-        # and channel size matches only when in_channels == out_channels.
         self.can_add_identity = (in_channels == out_channels and stride == 1)
 
         self.conv1 = nn.Conv2d(in_channels, bottleneck_channels, kernel_size=1, stride=1, bias=False)
@@ -52,7 +50,6 @@ class BottleneckBlock(nn.Module):
             self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=shortcut_stride, bias=False)
             self.shortcut.norm = nn.SyncBatchNorm(out_channels, eps=1e-05, momentum=0.1)
 
-        # self.relu = nn.ReLU(inplace=True)
         self.relu1 = nn.ReLU(inplace=True)
         self.relu2 = nn.ReLU(inplace=True)
         self.relu3 = nn.ReLU(inplace=True)
@@ -62,24 +59,25 @@ class BottleneckBlock(nn.Module):
 
         if self.has_shortcut:
             identity = self.shortcut(identity)
-            identity = self.shortcut.norm(identity)
+            if getattr(self.shortcut, "norm", None) is not None:
+                identity = self.shortcut.norm(identity)
 
         out = self.conv1(x)
-        out = self.conv1.norm(out)
-        # out = self.relu(out)
+        if getattr(self.conv1, "norm", None) is not None:
+            out = self.conv1.norm(out)
         out = self.relu1(out)
 
         out = self.conv2(out)
-        out = self.conv2.norm(out)
-        # out = self.relu(out)
+        if getattr(self.conv2, "norm", None) is not None:
+            out = self.conv2.norm(out)
         out = self.relu2(out)
 
         out = self.conv3(out)
-        out = self.conv3.norm(out)
+        if getattr(self.conv3, "norm", None) is not None:
+            out = self.conv3.norm(out)
 
         if self.has_shortcut or self.can_add_identity:
             out = out + identity
 
-        # out = self.relu(out)
         out = self.relu3(out)
         return out
