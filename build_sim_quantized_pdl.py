@@ -10,6 +10,7 @@ from model.pdl import build_model
 
 from quantization.calibration_dataset import (
     create_calibration_loader,
+    dedupe_image_paths,
     sample_calibration_images,
 )
 from quantization.quantize_function import (
@@ -73,6 +74,12 @@ def parse_args(argv=None):
     )
 
     parser.add_argument("--num_calib", type=int, default=800, help="number of calibration images")
+    parser.add_argument(
+        "--calib_size",
+        type=int,
+        default=None,
+        help="total number of images to feed into compute encodings; wraps around the calibration loader if needed",
+    )
     parser.add_argument("--batch_size", type=int, default=1, help="AIMET calibration batch size")
     parser.add_argument("--num_workers", type=int, default=2, help="dataloader workers")
     parser.add_argument("--seed", type=int, default=16, help="random seed for calibration sampling")
@@ -384,9 +391,21 @@ def main(args):
 
     print("Collecting calibration images...")
     all_calib_images = load_images(args.calib_images, num_iters=-1, recursive=True)
-    calib_images = sample_calibration_images(all_calib_images, args.num_calib, args.seed)
+    unique_calib_images = dedupe_image_paths(all_calib_images)
+    duplicate_count = len(all_calib_images) - len(unique_calib_images)
+    calib_images = sample_calibration_images(unique_calib_images, args.num_calib, args.seed)
     print(f"Found {len(all_calib_images)} candidate calibration images")
+    if duplicate_count > 0:
+        print(f"Removed {duplicate_count} duplicate calibration image paths before sampling")
+    print(f"Found {len(unique_calib_images)} unique calibration images")
     print(f"Using {len(calib_images)} images for calibration")
+
+    calib_size = args.calib_size if args.calib_size is not None else len(calib_images)
+    if calib_size <= 0:
+        raise ValueError("calib_size must be > 0")
+    print(f"compute_encodings will consume {calib_size} images")
+    if calib_size > len(calib_images):
+        print("Requested calib_size is larger than the sampled calibration set, so compute_encodings will wrap around and reuse images from the beginning")
 
     calib_loader = create_calibration_loader(
         calib_image_paths=calib_images,
@@ -654,7 +673,7 @@ def main(args):
     calib_start = time.time()
     sim.compute_encodings(
         forward_pass_callback=calibration_forward_pass,
-        forward_pass_callback_args=(calib_loader, args.device),
+        forward_pass_callback_args=(calib_loader, args.device, calib_size),
     )
     calib_time = time.time() - calib_start
     print(f"Calibration finished in {calib_time:.2f} s")

@@ -7,6 +7,21 @@ import torchvision.transforms as T
 import random
 from typing import List, Optional
 
+
+def dedupe_image_paths(image_paths: List[str]) -> List[str]:
+    """Deduplicate image paths by normalized real path while preserving order."""
+    unique_paths = []
+    seen = set()
+
+    for image_path in image_paths:
+        normalized = os.path.normcase(os.path.realpath(image_path))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_paths.append(image_path)
+
+    return unique_paths
+
 class CalibrationDataset(Dataset):
     def __init__(self, image_paths, image_width, image_height):
         self.image_paths = image_paths
@@ -56,13 +71,15 @@ def create_calibration_loader(
 
 
 def sample_calibration_images(all_image_paths: List[str], num_calib: int, seed: int) -> List[str]:
-    if len(all_image_paths) == 0:
+    unique_image_paths = dedupe_image_paths(all_image_paths)
+
+    if len(unique_image_paths) == 0:
         raise ValueError("No calibration images found.")
 
-    if num_calib >= len(all_image_paths):
-        return all_image_paths
+    if num_calib >= len(unique_image_paths):
+        return unique_image_paths
 
     rng = random.Random(seed)
-    sampled = rng.sample(all_image_paths, num_calib)
+    sampled = rng.sample(unique_image_paths, num_calib)
     sampled.sort()
     return sampled

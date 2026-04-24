@@ -1,5 +1,6 @@
 import torch
 import os
+import math
 from aimet_torch import quantsim
 from torch.utils.data import DataLoader, Dataset
 from aimet_torch.quantsim import QuantizationSimModel
@@ -90,12 +91,33 @@ def create_quant_sim(
     return sim, dummy_input
 
 def calibration_forward_pass(model, forward_pass_args):
-    dataloader, device = forward_pass_args
+    dataloader, device, calib_size = forward_pass_args
     model.eval()
+
+    if len(dataloader) == 0:
+        raise ValueError("Calibration dataloader is empty.")
+
+    if calib_size is None:
+        dataset_len = len(dataloader.dataset)
+        calib_size = dataset_len if dataset_len > 0 else len(dataloader)
+
+    if calib_size <= 0:
+        raise ValueError("calib_size must be > 0.")
+
+    processed = 0
+    loader_iter = iter(dataloader)
+
     with torch.no_grad():
-        for images in dataloader:
+        while processed < calib_size:
+            try:
+                images = next(loader_iter)
+            except StopIteration:
+                loader_iter = iter(dataloader)
+                images = next(loader_iter)
+
             images = images.to(device=device, dtype=torch.float32, non_blocking=True)
             _ = model(images)
+            processed += images.shape[0]
 
 def quantize_model_with_aimet(
     model,
@@ -105,6 +127,7 @@ def quantize_model_with_aimet(
     image_height,
     image_width,
     num_calib=500,
+    calib_size=None,
     quant_scheme="tf_enhanced",
     default_output_bw=8,
     default_param_bw=8,
@@ -136,7 +159,7 @@ def quantize_model_with_aimet(
 
     sim.compute_encodings(
         forward_pass_callback=calibration_forward_pass,
-        forward_pass_callback_args=(loader, device),
+        forward_pass_callback_args=(loader, device, calib_size or min(num_calib, len(dataset))),
     )
 
     return sim
