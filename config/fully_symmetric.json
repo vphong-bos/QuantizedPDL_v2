@@ -28,7 +28,7 @@
       "per_channel_quantization": "True"
     },
     "Concat": {
-      "is_quantized": "True"
+      "is_output_quantized": "True"
     }
   },
   "supergroups": [
