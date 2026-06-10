@@ -20,7 +20,7 @@ from quantization.quantize_function import (
     create_quant_sim,
     calibration_forward_pass,
 )
-from quantization.bias_correction import apply_bias_correction, copy_biases
+# from quantization.bias_correction import apply_bias_correction, copy_biases
 from utils.image_loader import load_images
 
 from evaluation.eval_dataset import build_eval_loader
@@ -475,33 +475,34 @@ def main(args):
     else:
         print("BN folding disabled")
 
-    if args.enable_bias_correction:
-        print("Applying Bias Correction...")
-        bc_start = time.time()
+    # if args.enable_bias_correction:
+    #     print("Applying Bias Correction...")
+    #     bc_start = time.time()
 
-        bc_model = copy.deepcopy(wrapped_model).to(args.device).eval()
+    #     bc_model = copy.deepcopy(wrapped_model).to(args.device).eval()
 
-        bc_model = apply_bias_correction(
-            model=bc_model,
-            calib_loader=calib_loader,
-            image_height=args.image_height,
-            image_width=args.image_width,
-            quant_scheme=args.quant_scheme,
-            default_param_bw=args.default_param_bw,
-            default_output_bw=args.default_output_bw,
-            config_file=args.config_file,
-            bias_corr_num_quant_samples=args.bias_corr_num_quant_samples,
-            bias_corr_num_bias_samples=args.bias_corr_num_bias_samples,
-            bias_corr_empirical_only=args.bias_corr_empirical_only,
-        )
+    #     bc_model = apply_bias_correction(
+    #         model=bc_model,
+    #         calib_loader=calib_loader,
+    #         image_height=args.image_height,
+    #         image_width=args.image_width,
+    #         quant_scheme=args.quant_scheme,
+    #         default_param_bw=args.default_param_bw,
+    #         default_output_bw=args.default_output_bw,
+    #         config_file=args.config_file,
+    #         bias_corr_num_quant_samples=args.bias_corr_num_quant_samples,
+    #         bias_corr_num_bias_samples=args.bias_corr_num_bias_samples,
+    #         bias_corr_empirical_only=args.bias_corr_empirical_only,
+    #     )
 
-        copy_biases(bc_model, wrapped_model)
-        del bc_model
+    #     copy_biases(bc_model, wrapped_model)
+    #     del bc_model
 
-        bc_time = time.time() - bc_start
-        print(f"Bias Correction finished in {bc_time:.2f} s")
-    else:
-        print("Bias Correction disabled")
+    #     bc_time = time.time() - bc_start
+    #     print(f"Bias Correction finished in {bc_time:.2f} s")
+    # else:
+    #     print("Bias Correction disabled")
+    print("Bias Correction disabled (code path commented out)")
 
     adaround_encoding_path = None
 
