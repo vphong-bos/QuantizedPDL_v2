@@ -7,6 +7,8 @@ import time
 import torch
 
 from model.pdl import build_model
+from model import semantic_head as _semantic_head  # noqa: F401
+from model import embeded_head as _embeded_head  # noqa: F401
 
 from quantization.calibration_dataset import (
     create_calibration_loader,

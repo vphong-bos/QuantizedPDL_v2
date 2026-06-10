@@ -13,6 +13,41 @@ from torch.nn import functional as F
 from model.aspp import ASPP, get_norm
 from model.conv2d import Conv2d
 
+try:
+    from aimet_torch.nn import QuantizationMixin
+except ImportError:  # pragma: no cover - optional during non-AIMET use
+    QuantizationMixin = None
+
+
+class DummyQuant(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x + torch.zeros_like(x)
+
+
+if QuantizationMixin is not None:
+    @QuantizationMixin.implements(DummyQuant)
+    class QuantizedDummyQuant(QuantizationMixin, DummyQuant):
+        def __quant_init__(self):
+            super().__quant_init__()
+
+            self.input_quantizers = torch.nn.ModuleList([None])
+            self.output_quantizers = torch.nn.ModuleList([None])
+
+        def forward(self, x):
+            if self.input_quantizers[0]:
+                x = self.input_quantizers[0](x)
+
+            with self._patch_quantized_parameters():
+                ret = super().forward(x)
+
+            if self.output_quantizers[0]:
+                ret = self.output_quantizers[0](ret)
+
+            return ret
+
 class ShapeSpec:
     """
     A simple structure that contains basic shape specification about a tensor.
@@ -160,9 +195,12 @@ class DeepLabV3PlusHead(nn.Module):
                     conv1,
                     conv2,
                 )
+                concat_fake_quant = DummyQuant()
 
             decoder_stage["project_conv"] = project_conv
             decoder_stage["fuse_conv"] = fuse_conv
+            if idx != len(self.in_features) - 1:
+                decoder_stage["concat_fake_quant"] = concat_fake_quant
             self.decoder[self.in_features[idx]] = decoder_stage
 
     @classmethod
@@ -214,6 +252,7 @@ class DeepLabV3PlusHead(nn.Module):
         proj_x = self.decoder[feature_keys[1]]["project_conv"](x)
         y_upsampled = F.interpolate(y, size=proj_x.size()[2:], mode="bilinear", align_corners=False)
         y = torch.cat([proj_x, y_upsampled], dim=1)
+        y = self.decoder[feature_keys[1]]["concat_fake_quant"](y)
         y = self.decoder[feature_keys[1]]["fuse_conv"](y)
 
         # --- Second Fusion Stage ---
@@ -221,6 +260,7 @@ class DeepLabV3PlusHead(nn.Module):
         proj_x = self.decoder[feature_keys[2]]["project_conv"](x)
         y_upsampled = F.interpolate(y, size=proj_x.size()[2:], mode="bilinear", align_corners=False)
         y = torch.cat([proj_x, y_upsampled], dim=1)
+        y = self.decoder[feature_keys[2]]["concat_fake_quant"](y)
         y = self.decoder[feature_keys[2]]["fuse_conv"](y)
         return y
 

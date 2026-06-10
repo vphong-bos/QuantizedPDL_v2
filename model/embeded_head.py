@@ -11,7 +11,7 @@ from torch.nn import functional as F
 
 from model.aspp import get_norm
 from model.conv2d import Conv2d
-from model.semantic_head import DeepLabV3PlusHead, ShapeSpec
+from model.semantic_head import DeepLabV3PlusHead, ShapeSpec, DummyQuant
 
 class PanopticDeepLabInsEmbedHead(DeepLabV3PlusHead):
     """
@@ -103,6 +103,10 @@ class PanopticDeepLabInsEmbedHead(DeepLabV3PlusHead):
         self.offset_predictor = Conv2d(head_channels, 2, kernel_size=1)
         nn.init.constant_(self.offset_predictor.bias, 0)
 
+        # Insert fake quant before branch conv stacks to mirror decoder concat boundaries.
+        self.center_input_fake_quant = DummyQuant()
+        self.offset_input_fake_quant = DummyQuant()
+
     def forward(
         self,
         features,
@@ -134,10 +138,10 @@ class PanopticDeepLabInsEmbedHead(DeepLabV3PlusHead):
 
         y = super().layers(features)
 
-        center = self.center_head(y)
+        center = self.center_head(self.center_input_fake_quant(y))
         center = self.center_predictor(center)
 
-        offset = self.offset_head(y)
+        offset = self.offset_head(self.offset_input_fake_quant(y))
         offset = self.offset_predictor(offset)
 
         return center, offset
