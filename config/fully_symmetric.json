@@ -26,13 +26,11 @@
     },
     "MatMul": {
       "per_channel_quantization": "True"
-    },
-    "Concat": {
-      "is_output_quantized": "True"
     }
   },
   "supergroups": [
     { "op_list": ["Conv", "Relu"] },
+    { "op_list": ["Add", "Relu"] },
     { "op_list": ["Conv", "BatchNormalization", "Relu"] },
     { "op_list": ["Conv", "Identity", "Relu"] }
   ],

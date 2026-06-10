@@ -2,13 +2,8 @@
 import argparse
 import os
 
+import onnxruntime as ort
 import torch
-
-from model.pdl import (
-    build_model,
-)
-
-from quantization.quantize_function import load_aimet_quantized_model
 
 from evaluation.eval_dataset import build_eval_loader
 from evaluation.eval_metrics import evaluate_model
@@ -16,13 +11,9 @@ from evaluation.eval_metrics import evaluate_model
 from utils.pcc_metric import evaluate_pcc
 from utils.export_onnx import export_optimized_onnx_model
 
-import torch
-from aimet_torch.v2.nn import QuantizationMixin
-from model.conv2d import Conv2d
-from model.quantized_conv2d import QuantizedConv2d
-
 pdl_home_path = os.path.dirname(os.path.realpath(__file__))
 DEFAULT_EXPORT_PATH = os.path.join(pdl_home_path, "quantized_export")
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -68,6 +59,59 @@ def parse_args():
 
     return parser.parse_args()
 
+
+def load_exported_onnx_model(quant_weights, model_category, provider):
+    from model.pdl import DEEPLAB_V3_PLUS, PANOPTIC_DEEPLAB
+
+    model_category_const = (
+        PANOPTIC_DEEPLAB if model_category == "PANOPTIC_DEEPLAB" else DEEPLAB_V3_PLUS
+    )
+
+    so = ort.SessionOptions()
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+
+    session = ort.InferenceSession(
+        quant_weights,
+        sess_options=so,
+        providers=[provider],
+    )
+
+    input_name = session.get_inputs()[0].name
+    output_names = [o.name for o in session.get_outputs()]
+
+    print(f"[ONNX] input: {input_name}")
+    print(f"[ONNX] outputs: {output_names}")
+
+    return {
+        "backend": "onnx",
+        "session": session,
+        "input_name": input_name,
+        "output_names": output_names,
+        "model": None,
+        "model_category_const": model_category_const,
+    }
+
+
+def load_quantized_model(args):
+    if args.quant_weights.lower().endswith(".onnx"):
+        print("Detected exported ONNX model")
+        return load_exported_onnx_model(
+            quant_weights=args.quant_weights,
+            model_category=args.model_category,
+            provider=args.onnx_provider,
+        )
+
+    print("Detected AIMET checkpoint")
+    from quantization.quantize_function import load_aimet_quantized_model
+
+    return load_aimet_quantized_model(
+        quant_weights=args.quant_weights,
+        model_category=args.model_category,
+        device=args.device,
+        provider=args.onnx_provider,
+    )
+
+
 def main():
     args = parse_args()
 
@@ -90,6 +134,8 @@ def main():
     )
 
     if args.fp32_weights:
+        from model.pdl import build_model
+
         print("Loading FP32 model...")
         fp32_model, fp32_category = build_model(
             weights_path=args.fp32_weights,
@@ -119,12 +165,7 @@ def main():
     if args.quant_weights:
 
         print("Loading quantized model...")
-        quant_obj = load_aimet_quantized_model(
-            quant_weights=args.quant_weights,
-            model_category=args.model_category,
-            device=args.device,
-            provider=args.onnx_provider,
-        )
+        quant_obj = load_quantized_model(args)
 
         print("Evaluating quantized...")
         quant_results = evaluate_model(
